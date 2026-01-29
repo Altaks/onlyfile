@@ -1,0 +1,22 @@
+{
+    "recommendations": [
+        "rust-lang.rust-analyzer",
+        "42crunch.vscode-openapi",
+        "vadimcn.vscode-lldb",
+        "humao.rest-client",
+        "mhutchie.git-graph",
+        "bradlc.vscode-tailwindcss",
+        "aaron-bond.better-comments",
+        "usernamehw.errorlens",
+        "redhat.vscode-yaml",
+        "pomber.git-file-history",
+        "ms-vscode.hexeditor",
+        "tamasfe.even-better-toml",
+        "skellock.just",
+        "leighlondon.eml",
+        "barbosshack.crates-io"
+    ],
+    "unwantedRecommendations": [
+        "esbenp.prettier-vscode"
+    ]
+}

@@ -1,0 +1,8 @@
+[package]
+name = "main"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+main_lib = { workspace = true }
