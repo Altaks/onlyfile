@@ -1447,6 +1447,7 @@ dependencies = [
  "glidesort",
  "itertools",
  "model",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "xxhash-rust",
