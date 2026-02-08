@@ -6,9 +6,13 @@ license = "MIT"
 
 [workspace]
 resolver = "3"
-members = ["apps/cli", "libs/scanner"]
+members = ["apps/cli", "libs/model", "libs/replica", "libs/scanner"]
 
 [workspace.dependencies]
+model = { path = "libs/model" }
+replica = { path = "libs/replica" }
+scanner = { path = "libs/scanner" }
+
 # Async tasks scheduling, and stream management
 tokio = { version = "1.48", features = ["full", "tracing", "rt-multi-thread"] }
 
@@ -32,10 +36,20 @@ crossterm = "0.29.0"
 tempfile = "3.24.0"
 
 # Hashing algorithms
-blake3 = { version = "1.8.3" }
+
+# First thought algorithm, but xx3 hashing allows to hash much more data per sec.
+# See https://github.com/Cyan4973/xxHash/wiki/Performance-comparison#benchmarks-concentrating-on-small-data- 
+# blake3 = { version = "1.8.3" } 
+
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+# Fast af sorting algorithm
+glidesort = "0.1.2"
 
 # Bloom filters 
-bloomfilter = { version = "3.0.1" }
+fastbloom = { version = "0.14.1" }
+
+itertools = { version = "0.14.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

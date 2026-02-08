@@ -1,23 +1,14 @@
-use std::{
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
-};
+use std::{os::unix::fs::MetadataExt, path::Path};
 
 use crate::errors::ScannerError;
+use model::ScannerFileEntry;
 
 mod errors;
 
-#[derive(Debug, PartialEq)]
-pub struct FileEntry {
-    pub path: PathBuf,
-    pub file_size: u64,
-    pub hash: Option<blake3::Hash>,
-}
-
-pub async fn list_all_non_unique_files_in_folder(
+pub async fn crawl_and_collect_files(
     path: impl AsRef<Path>,
-) -> Result<Vec<FileEntry>, ScannerError> {
-    let mut collector = Vec::new();
+) -> Result<Vec<ScannerFileEntry>, ScannerError> {
+    let mut files_collector = Vec::<ScannerFileEntry>::new();
     let mut stack = Vec::new();
     stack.push(path.as_ref().to_path_buf());
 
@@ -29,52 +20,31 @@ pub async fn list_all_non_unique_files_in_folder(
             if entry_path.is_dir() {
                 stack.push(entry_path);
             } else {
-                let file_size = get_file_size(&entry_path).await?;
+                let file_size = entry.metadata().await?.size();
 
-                collector.push(FileEntry {
+                files_collector.push(ScannerFileEntry {
                     path: entry_path,
-                    file_size: file_size,
-                    hash: None,
+                    file_size,
                 });
             }
         }
     }
 
-    Ok(collector)
-}
-
-async fn remove_all_unique_files_from_list(files_list: &mut Vec<FileEntry>) {
-    // Prepare a by-size bloom filter
-    // Prepare a by-hash bloom filter
-
-    // use the by-size bloom filter first,
-    // use the by-hash bloom filter next
-}
-
-async fn hash_file(path: impl AsRef<Path>) -> Result<blake3::Hash, ScannerError> {
-    let file_content = tokio::fs::read(path).await?;
-    let hash = blake3::hash(&file_content);
-    Ok(hash)
-}
-
-async fn get_file_size(path: impl AsRef<Path>) -> Result<u64, ScannerError> {
-    let file_metadata = tokio::fs::metadata(path).await?;
-    let file_size = file_metadata.size();
-    Ok(file_size)
+    Ok(files_collector)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
 
+    use model::ScannerFileEntry;
     use tempfile::{TempDir, tempdir};
 
-    use crate::{FileEntry, list_all_non_unique_files_in_folder};
+    use crate::crawl_and_collect_files;
 
     #[tokio::test]
     async fn test_list_files_in_empty_folder() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
-        let files = list_all_non_unique_files_in_folder(tempdir.path()).await?;
+        let files = crawl_and_collect_files(tempdir.path()).await?;
         assert!(files.is_empty());
         Ok(())
     }
@@ -86,7 +56,7 @@ mod tests {
 
         tokio::fs::write(&file_path, "contenu").await?;
 
-        let files = list_all_non_unique_files_in_folder(temp_dir.path()).await?;
+        let files = crawl_and_collect_files(temp_dir.path()).await?;
         assert_eq!(files.len(), 1);
         Ok(())
     }
@@ -102,7 +72,7 @@ mod tests {
             tokio::fs::write(&file_path, format!("content-{}", idx)).await?;
         }
 
-        let files = list_all_non_unique_files_in_folder(temp_dir.path()).await?;
+        let files = crawl_and_collect_files(temp_dir.path()).await?;
         assert_eq!(files.len(), AMOUNT_OF_FILES);
         Ok(())
     }
@@ -124,7 +94,7 @@ mod tests {
             }
         }
 
-        let files = list_all_non_unique_files_in_folder(root_dir.path()).await?;
+        let files = crawl_and_collect_files(root_dir.path()).await?;
         assert_eq!(files.len(), AMOUNT_OF_BRANCHES * AMOUNT_OF_LEAFS);
         Ok(())
     }
@@ -136,21 +106,19 @@ mod tests {
         tokio::fs::write(root_dir.path().join("file1.tmp"), "Some content").await?;
         tokio::fs::write(root_dir.path().join("file2.tmp"), "Some content 2").await?;
 
-        let listed_files = list_all_non_unique_files_in_folder(root_dir.path()).await?;
+        let listed_files = crawl_and_collect_files(root_dir.path()).await?;
         assert_eq!(
             listed_files[0],
-            FileEntry {
+            ScannerFileEntry {
                 path: root_dir.path().join("file1.tmp"),
                 file_size: 12u64,
-                hash: None
             }
         );
         assert_eq!(
             listed_files[1],
-            FileEntry {
+            ScannerFileEntry {
                 path: root_dir.path().join("file2.tmp"),
                 file_size: 14u64,
-                hash: None
             }
         );
 
