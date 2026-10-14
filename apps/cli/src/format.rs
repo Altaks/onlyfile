@@ -6,6 +6,7 @@ use std::{
 };
 
 use jiff::{Timestamp, tz::TimeZone};
+use model::SkipReason;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BYTES_PER_UNIT: f64 = 1024.0;
@@ -83,6 +84,16 @@ pub fn format_path(path: &Path, home: &Path) -> String {
         Ok(relative) if relative.as_os_str().is_empty() => HOME_PREFIX.to_owned(),
         Ok(relative) => format!("{HOME_PREFIX}{MAIN_SEPARATOR}{}", relative.display()),
         Err(_) => path.display().to_string(),
+    }
+}
+
+/// Why an entry was left out, in a few words.
+pub fn format_skip_reason(reason: SkipReason) -> String {
+    match reason {
+        SkipReason::Symlink => "symlink".to_owned(),
+        SkipReason::SpecialFile => "special file".to_owned(),
+        SkipReason::EmptyFile => "empty file".to_owned(),
+        SkipReason::Unreadable(kind) => format!("unreadable: {kind}"),
     }
 }
 
@@ -240,6 +251,17 @@ mod tests {
         assert_eq!(
             format_path(&elsewhere, &home),
             elsewhere.display().to_string()
+        );
+    }
+
+    #[test]
+    fn skip_reasons_read_as_plain_words() {
+        assert_eq!(format_skip_reason(SkipReason::Symlink), "symlink");
+        assert_eq!(format_skip_reason(SkipReason::SpecialFile), "special file");
+        assert_eq!(format_skip_reason(SkipReason::EmptyFile), "empty file");
+        assert_eq!(
+            format_skip_reason(SkipReason::Unreadable(std::io::ErrorKind::PermissionDenied)),
+            "unreadable: permission denied"
         );
     }
 
