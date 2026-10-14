@@ -7,11 +7,10 @@ license.workspace = true
 
 [dependencies]
 model = { workspace = true }
-tokio = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
