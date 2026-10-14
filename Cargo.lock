@@ -604,12 +604,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glidesort"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2e102e6eb644d3e0b186fc161e4460417880a0a0b87d235f2e5b8fb30f2e9e0"
-
-[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,7 +1438,6 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 name = "replica"
 version = "0.1.0"
 dependencies = [
- "glidesort",
  "itertools",
  "model",
  "tempfile",

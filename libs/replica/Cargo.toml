@@ -10,7 +10,6 @@ model = { workspace = true }
 tokio = { workspace = true }
 xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
-glidesort = { workspace = true }
 itertools = { workspace = true }
 
 [dev-dependencies]
