@@ -26,6 +26,16 @@ impl DuplicateGroup {
     pub fn copies(&self) -> &[ScannerFileEntry] {
         &self.copies
     }
+
+    /// The size of one copy. Every copy has the same size since their content is identical.
+    pub fn file_size(&self) -> u64 {
+        self.copies[0].file_size
+    }
+
+    /// The space freed by keeping one copy and removing all the others.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.file_size() * (self.copies.len() as u64 - 1)
+    }
 }
 
 #[cfg(test)]
@@ -33,9 +43,13 @@ mod tests {
     use super::*;
 
     fn entry(name: &str) -> ScannerFileEntry {
+        sized_entry(name, 1)
+    }
+
+    fn sized_entry(name: &str, file_size: u64) -> ScannerFileEntry {
         ScannerFileEntry {
             path: PathBuf::from(name),
-            file_size: 1,
+            file_size,
             modified: SystemTime::UNIX_EPOCH,
         }
     }
@@ -51,5 +65,18 @@ mod tests {
             .expect("two copies are a group");
 
         assert_eq!(group.copies(), [entry("first"), entry("second")]);
+    }
+
+    #[test]
+    fn removing_all_copies_but_one_reclaims_their_size() {
+        let group = DuplicateGroup::new(vec![
+            sized_entry("first", 412),
+            sized_entry("second", 412),
+            sized_entry("third", 412),
+        ])
+        .expect("three copies are a group");
+
+        assert_eq!(group.file_size(), 412);
+        assert_eq!(group.reclaimable_bytes(), 2 * 412);
     }
 }
