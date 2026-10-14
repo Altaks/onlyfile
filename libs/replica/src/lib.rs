@@ -186,7 +186,10 @@ mod tests {
 
         // With 2 identical files, should have 1 duplicate group
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let (key, dup_files) = duplicates
+            .iter()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1); // One duplicate file
 
         // Verify paths are in the result
@@ -224,7 +227,10 @@ mod tests {
 
         // Should have one duplicate group
         assert_eq!(duplicates.len(), 1);
-        let (_key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 2); // Two duplicate files
 
         Ok(())
@@ -322,7 +328,10 @@ mod tests {
 
         // Should detect empty files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let (key, dup_files) = duplicates
+            .iter()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(key.file_size, 0);
         assert_eq!(dup_files.len(), 1);
 
@@ -356,7 +365,10 @@ mod tests {
 
         // Should detect binary files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())
@@ -390,7 +402,10 @@ mod tests {
 
         // Should detect large files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())
@@ -411,11 +426,7 @@ mod tests {
         ];
 
         let result = detect_duplicates(&mut files).await;
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            ReplicaError::FileSystemError(_) => {} // Expected
-        }
+        assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
     /// Test: Mixed scenario with duplicates and unique files
@@ -491,7 +502,10 @@ mod tests {
 
         // Should still detect duplicates correctly
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())

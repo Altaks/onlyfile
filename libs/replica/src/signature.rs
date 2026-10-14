@@ -287,10 +287,7 @@ mod tests {
 
         let result = quick_hash_file(non_existent_path, file_size).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ReplicaError::FileSystemError(_) => {} // Expected error type
-        }
+        assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
     /// Test error handling when file size doesn't match actual file size
