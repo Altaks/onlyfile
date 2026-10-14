@@ -11,6 +11,9 @@ xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 itertools = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

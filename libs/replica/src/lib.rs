@@ -1,10 +1,18 @@
-use std::{collections::HashMap, io, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::PathBuf,
+};
 
 use itertools::Itertools;
 use model::{DuplicateGroup, ScannerFileEntry, SkipReason, SkippedEntry};
 
-use crate::signature::{content_hash_file, quick_hash_file};
+use crate::{
+    identity::{FileIdentity, file_identity},
+    signature::{content_hash_file, quick_hash_file},
+};
 
+mod identity;
 mod signature;
 
 /// How far [`detect_duplicates`] has gone. Each phase reports its totals as soon as it starts.
@@ -36,8 +44,9 @@ pub struct ComparisonReport {
 /// the copies inside a group keep the input order.
 ///
 /// Reading every byte of every file is the expensive part, so it only happens for files that
-/// already share a size and a sampled hash with another file. A file that cannot be read at any
-/// step is skipped and the others are still compared. `on_progress` is called once when each phase starts and once after each file.
+/// already share a size and a sampled hash with another file. Hardlinks are counted once, under
+/// their first name. A file that cannot be read at any step is skipped and the others are still
+/// compared. `on_progress` is called once when each phase starts and once after each file.
 pub fn detect_duplicates(
     files: &[ScannerFileEntry],
     mut on_progress: impl FnMut(ComparisonProgress),
@@ -51,7 +60,19 @@ pub fn detect_duplicates(
     };
     let unreadable = |error: io::Error| SkipReason::Unreadable(error.kind());
 
-    let size_candidates = with_a_size_twin(files.iter()).collect_vec();
+    // Hardlinks share their size, so only files with a size twin can be one. The first name of a
+    // file is kept, in input order.
+    let mut seen_identities = HashSet::<FileIdentity>::new();
+    let mut distinct_files = Vec::new();
+    for file in with_a_size_twin(files.iter()) {
+        match file_identity(&file.path) {
+            Ok(identity) if seen_identities.insert(identity) => distinct_files.push(file),
+            Ok(_) => skip(&file.path, SkipReason::Hardlink),
+            Err(error) => skip(&file.path, unreadable(error)),
+        }
+    }
+    // A file whose only size twin was another name of itself has nothing left to compare with.
+    let size_candidates = with_a_size_twin(distinct_files.into_iter()).collect_vec();
 
     on_progress(ComparisonProgress::Sampling {
         sampled_files: 0,
@@ -498,6 +519,77 @@ mod tests {
                 path: vanishing,
                 reason: SkipReason::Unreadable(io::ErrorKind::NotFound),
             }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_hardlink_counts_once_and_is_listed_as_skipped() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let content: &[u8] = b"one file, two names, and a real copy";
+        let original = temp_dir.path().join("original");
+        let hardlink = temp_dir.path().join("hardlink");
+        std::fs::write(&original, content)?;
+        std::fs::hard_link(&original, &hardlink)?;
+        let mut files = write_files(temp_dir.path(), &[("copy", content)])?;
+        for path in [&original, &hardlink] {
+            files.insert(
+                files.len() - 1,
+                ScannerFileEntry {
+                    path: path.clone(),
+                    file_size: content.len() as u64,
+                    modified: std::fs::metadata(path)?.modified()?,
+                },
+            );
+        }
+
+        let report = detect_duplicates(&files, |_| {});
+
+        assert_eq!(
+            grouped_paths(&report.groups),
+            [paths_under(temp_dir.path(), &["copy", "original"])]
+        );
+        assert_eq!(
+            report.skipped,
+            [SkippedEntry {
+                path: hardlink,
+                reason: SkipReason::Hardlink,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn two_names_for_one_file_are_not_duplicates() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let original = temp_dir.path().join("original");
+        let hardlink = temp_dir.path().join("hardlink");
+        std::fs::write(&original, b"only one file on disk")?;
+        std::fs::hard_link(&original, &hardlink)?;
+        let files = [&original, &hardlink].map(|path| ScannerFileEntry {
+            path: path.clone(),
+            file_size: 21,
+            modified: SystemTime::UNIX_EPOCH,
+        });
+
+        let mut reported_progress = Vec::new();
+        let report = detect_duplicates(&files, |progress| reported_progress.push(progress));
+
+        assert!(report.groups.is_empty());
+        assert_eq!(
+            report.skipped,
+            [SkippedEntry {
+                path: hardlink,
+                reason: SkipReason::Hardlink,
+            }]
+        );
+        // Alone once the names collapse, the file is not even sampled.
+        assert_eq!(
+            reported_progress[0],
+            ComparisonProgress::Sampling {
+                sampled_files: 0,
+                total_files: 0,
+            }
         );
         Ok(())
     }
