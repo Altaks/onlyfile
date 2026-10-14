@@ -5,8 +5,11 @@ use model::ScannerFileEntry;
 
 mod errors;
 
+/// Lists every file below `path`. `on_file_found` receives the number of files found so far after
+/// each new one, so a caller can show progress while a large tree is walked.
 pub fn crawl_and_collect_files(
     path: impl AsRef<Path>,
+    mut on_file_found: impl FnMut(usize),
 ) -> Result<Vec<ScannerFileEntry>, ScannerError> {
     let mut files_collector = Vec::<ScannerFileEntry>::new();
     let mut stack = vec![path.as_ref().to_path_buf()];
@@ -24,6 +27,7 @@ pub fn crawl_and_collect_files(
                     file_size: metadata.len(),
                     modified: metadata.modified()?,
                 });
+                on_file_found(files_collector.len());
             }
         }
     }
@@ -46,7 +50,7 @@ mod tests {
     #[test]
     fn test_list_files_in_empty_folder() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
-        let files = crawl_and_collect_files(tempdir.path())?;
+        let files = crawl_and_collect_files(tempdir.path(), |_| {})?;
         assert!(files.is_empty());
         Ok(())
     }
@@ -58,7 +62,7 @@ mod tests {
 
         std::fs::write(&file_path, "contenu")?;
 
-        let files = crawl_and_collect_files(temp_dir.path())?;
+        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?;
         assert_eq!(files.len(), 1);
         Ok(())
     }
@@ -74,7 +78,7 @@ mod tests {
             std::fs::write(&file_path, format!("content-{}", idx))?;
         }
 
-        let files = crawl_and_collect_files(temp_dir.path())?;
+        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?;
         assert_eq!(files.len(), AMOUNT_OF_FILES);
         Ok(())
     }
@@ -96,8 +100,26 @@ mod tests {
             }
         }
 
-        let files = crawl_and_collect_files(root_dir.path())?;
+        let files = crawl_and_collect_files(root_dir.path(), |_| {})?;
         assert_eq!(files.len(), AMOUNT_OF_BRANCHES * AMOUNT_OF_LEAFS);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_the_running_count_of_files_found() -> anyhow::Result<()> {
+        let root_dir = TempDir::new()?;
+        let nested_dir = root_dir.path().join("nested");
+        std::fs::create_dir(&nested_dir)?;
+        std::fs::write(root_dir.path().join("first.tmp"), "first")?;
+        std::fs::write(nested_dir.join("second.tmp"), "second")?;
+        std::fs::write(nested_dir.join("third.tmp"), "third")?;
+
+        let mut reported_counts = Vec::new();
+        crawl_and_collect_files(root_dir.path(), |files_found| {
+            reported_counts.push(files_found)
+        })?;
+
+        assert_eq!(reported_counts, [1, 2, 3]);
         Ok(())
     }
 
@@ -119,7 +141,7 @@ mod tests {
             .open(&second_path)?
             .set_modified(second_modified)?;
 
-        let mut listed_files = crawl_and_collect_files(root_dir.path())?;
+        let mut listed_files = crawl_and_collect_files(root_dir.path(), |_| {})?;
         // read_dir order is filesystem-defined, so compare in path order.
         listed_files.sort_by(|left, right| left.path.cmp(&right.path));
 
