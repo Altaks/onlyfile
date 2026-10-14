@@ -9,7 +9,7 @@ mod errors;
 mod signature;
 
 pub async fn detect_duplicates(
-    files: &mut Vec<ScannerFileEntry>,
+    files: &mut [ScannerFileEntry],
 ) -> Result<HashMap<HashedFileEntry, Vec<HashedFileEntry>>, ReplicaError> {
     // Presort files list by their sizes
     glidesort::sort_by_key(files, |it| it.file_size);
@@ -38,7 +38,6 @@ pub async fn detect_duplicates(
     let non_unique_grouped_files_by_size = non_unique_hashed_files
         .iter()
         .filter(|it| hash_counts[&it.hash] > 1) // Only files with duplicate hashes
-        .into_iter()
         .chunk_by(|it| it.file_size);
 
     let non_unique_grouped_files_by_size_and_hashes = non_unique_grouped_files_by_size
@@ -54,11 +53,11 @@ pub async fn detect_duplicates(
 
     non_unique_grouped_files_by_size_and_hashes.for_each(|size_group| {
         size_group.into_iter().for_each(|hash_group| {
-            let mut hash_group_iter = hash_group.1.into_iter();
+            let mut hash_group_iter = hash_group.1;
 
             if let Some(first_file_entry) = hash_group_iter.next() {
                 let mut other_hashed_files = Vec::<HashedFileEntry>::new();
-                while let Some(entry) = hash_group_iter.next() {
+                for entry in hash_group_iter {
                     other_hashed_files.push(entry.clone());
                 }
 
