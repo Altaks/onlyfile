@@ -1,17 +1,28 @@
 [package]
-name = "cli"
+name = "onlyfile"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio = { workspace = true }
+model = { workspace = true }
+scanner = { workspace = true }
+replica = { workspace = true }
+
+ratatui = { workspace = true }
+unicode-width = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+jiff = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 thiserror = { workspace = true }
 
-ratatui = { workspace = true }
-crossterm = { workspace = true }
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
