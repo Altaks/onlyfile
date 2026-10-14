@@ -1,4 +1,4 @@
-use std::{fmt::Debug, hash::Hash, path::PathBuf, time::SystemTime};
+use std::{fmt::Debug, hash::Hash, io, path::PathBuf, time::SystemTime};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct ScannerFileEntry {
@@ -6,6 +6,24 @@ pub struct ScannerFileEntry {
     pub file_size: u64,
     /// Last modification instant, as the filesystem reports it.
     pub modified: SystemTime,
+}
+
+/// Why an entry was left out of the comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Never followed, so a link can neither loop nor lead outside the scanned folder.
+    Symlink,
+    /// A socket, a pipe or a device: there is no content to compare.
+    SpecialFile,
+    /// Nothing to reclaim, and often a placeholder that something depends on.
+    EmptyFile,
+    Unreadable(io::ErrorKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedEntry {
+    pub path: PathBuf,
+    pub reason: SkipReason,
 }
 
 /// One file below this is not a duplicate of anything.

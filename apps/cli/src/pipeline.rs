@@ -8,10 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use model::DuplicateGroup;
+use model::{DuplicateGroup, SkipReason, SkippedEntry};
 use replica::{ComparisonProgress, ReplicaError};
 use scanner::ScannerError;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// One frame at the interface's refresh rate. Sending more often only fills the channel.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -35,6 +35,7 @@ pub enum PipelineEvent {
 pub struct ScanOutcome {
     pub scanned_files: usize,
     pub groups: Vec<DuplicateGroup>,
+    pub skipped: Vec<SkippedEntry>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,26 +79,54 @@ fn scan_and_compare(
         report(PipelineProgress::Walking { files_found })
     })
     .map_err(PipelineError::from)
-    .and_then(|files| {
-        let groups = replica::detect_duplicates(&files, |progress| {
+    .and_then(|scan| {
+        let groups = replica::detect_duplicates(&scan.files, |progress| {
             report(PipelineProgress::Comparing(progress))
         })?;
         Ok(ScanOutcome {
-            scanned_files: files.len(),
+            scanned_files: scan.files.len(),
             groups,
+            skipped: scan.skipped,
         })
     });
 
     match &outcome {
-        Ok(outcome) => info!(
-            scanned_files = outcome.scanned_files,
-            duplicate_groups = outcome.groups.len(),
-            elapsed = ?started.elapsed(),
-            "scan finished"
-        ),
+        Ok(outcome) => {
+            log_skipped_entries(&outcome.skipped);
+            info!(
+                scanned_files = outcome.scanned_files,
+                duplicate_groups = outcome.groups.len(),
+                skipped_entries = outcome.skipped.len(),
+                elapsed = ?started.elapsed(),
+                "scan finished"
+            );
+        }
         Err(error) => error!(%error, "scan failed"),
     }
     outcome
+}
+
+/// An unreadable entry is worth a look, so each one gets its own line. Symlinks, special and empty
+/// files are left out by design and can number in the thousands, so they are only counted.
+fn log_skipped_entries(skipped: &[SkippedEntry]) {
+    for entry in skipped {
+        if let SkipReason::Unreadable(kind) = entry.reason {
+            warn!(path = %entry.path.display(), reason = %kind, "unreadable entry skipped");
+        }
+    }
+
+    let count_of = |reason: SkipReason| {
+        skipped
+            .iter()
+            .filter(|entry| entry.reason == reason)
+            .count()
+    };
+    info!(
+        symlinks = count_of(SkipReason::Symlink),
+        special_files = count_of(SkipReason::SpecialFile),
+        empty_files = count_of(SkipReason::EmptyFile),
+        "entries left out by design"
+    );
 }
 
 #[cfg(test)]
@@ -107,11 +136,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_last_event_carries_every_duplicate_group() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_last_event_carries_every_duplicate_group_and_skipped_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
         let root = TempDir::new()?;
         std::fs::write(root.path().join("original"), "same content")?;
         std::fs::write(root.path().join("copy"), "same content")?;
         std::fs::write(root.path().join("unique"), "other content")?;
+        std::fs::write(root.path().join("empty"), "")?;
 
         let last_event = spawn(root.path().to_path_buf())
             .into_iter()
@@ -131,6 +162,13 @@ mod tests {
         assert_eq!(
             grouped_paths,
             [root.path().join("copy"), root.path().join("original")]
+        );
+        assert_eq!(
+            outcome.skipped,
+            [SkippedEntry {
+                path: root.path().join("empty"),
+                reason: SkipReason::EmptyFile,
+            }]
         );
         Ok(())
     }

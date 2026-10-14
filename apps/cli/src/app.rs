@@ -195,6 +195,7 @@ mod tests {
                 .into_iter()
                 .map(|copies| DuplicateGroup::new(copies).expect("at least two copies"))
                 .collect(),
+            skipped: Vec::new(),
         }))
     }
 

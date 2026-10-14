@@ -1,57 +1,131 @@
-use std::path::Path;
+use std::{
+    fs::{DirEntry, ReadDir},
+    path::{Path, PathBuf},
+};
 
-use model::ScannerFileEntry;
+use model::{ScannerFileEntry, SkipReason, SkippedEntry};
 
 pub use crate::errors::ScannerError;
 
 mod errors;
 
-/// Lists every file below `path`. `on_file_found` receives the number of files found so far after
-/// each new one, so a caller can show progress while a large tree is walked.
-pub fn crawl_and_collect_files(
-    path: impl AsRef<Path>,
-    mut on_file_found: impl FnMut(usize),
-) -> Result<Vec<ScannerFileEntry>, ScannerError> {
-    let mut files_collector = Vec::<ScannerFileEntry>::new();
-    let mut stack = vec![path.as_ref().to_path_buf()];
+/// What a walk found: the files worth comparing, and every entry left out with the reason.
+#[derive(Debug, Default)]
+pub struct ScanReport {
+    pub files: Vec<ScannerFileEntry>,
+    pub skipped: Vec<SkippedEntry>,
+}
 
-    while let Some(current_path) = stack.pop() {
-        for entry in std::fs::read_dir(&current_path)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                stack.push(entry_path);
-            } else {
-                let metadata = entry.metadata()?;
-                files_collector.push(ScannerFileEntry {
-                    path: entry_path,
-                    file_size: metadata.len(),
-                    modified: metadata.modified()?,
-                });
-                on_file_found(files_collector.len());
+/// Lists every regular, non-empty file below `root`. Symlinks are never followed. A subfolder or
+/// an entry that cannot be read is recorded in `skipped` and the walk goes on; only an unreadable
+/// `root` is an error.
+///
+/// `on_file_found` receives the number of files found so far after each new one, so a caller can
+/// show progress while a large tree is walked.
+pub fn crawl_and_collect_files(
+    root: impl AsRef<Path>,
+    on_file_found: impl FnMut(usize),
+) -> Result<ScanReport, ScannerError> {
+    let root = root.as_ref();
+    let root_listing = std::fs::read_dir(root)?;
+
+    let mut crawler = Crawler {
+        report: ScanReport::default(),
+        pending_folders: Vec::new(),
+        on_file_found,
+    };
+    crawler.list(root, root_listing);
+    // Folders wait as paths rather than open listings, so a wide tree never holds thousands of
+    // folder handles at once.
+    while let Some(folder) = crawler.pending_folders.pop() {
+        match std::fs::read_dir(&folder) {
+            Ok(listing) => crawler.list(&folder, listing),
+            Err(error) => crawler.skip(folder, SkipReason::Unreadable(error.kind())),
+        }
+    }
+
+    Ok(crawler.report)
+}
+
+struct Crawler<OnFileFound> {
+    report: ScanReport,
+    pending_folders: Vec<PathBuf>,
+    on_file_found: OnFileFound,
+}
+
+impl<OnFileFound: FnMut(usize)> Crawler<OnFileFound> {
+    fn list(&mut self, folder: &Path, listing: ReadDir) {
+        for entry in listing {
+            match entry {
+                Ok(entry) => self.visit(entry),
+                // The listing failed partway, and the entry it could not read has no name yet.
+                Err(error) => self.skip(folder.to_path_buf(), SkipReason::Unreadable(error.kind())),
             }
         }
     }
 
-    Ok(files_collector)
+    fn visit(&mut self, entry: DirEntry) {
+        let path = entry.path();
+        // The entry's own type: a symlink reports itself, not what it points to.
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => return self.skip(path, SkipReason::Unreadable(error.kind())),
+        };
+
+        if file_type.is_symlink() {
+            self.skip(path, SkipReason::Symlink);
+        } else if file_type.is_dir() {
+            self.pending_folders.push(path);
+        } else if file_type.is_file() {
+            self.collect(path, &entry);
+        } else {
+            self.skip(path, SkipReason::SpecialFile);
+        }
+    }
+
+    fn collect(&mut self, path: PathBuf, entry: &DirEntry) {
+        let size_and_modified = entry
+            .metadata()
+            .and_then(|metadata| Ok((metadata.len(), metadata.modified()?)));
+        let (file_size, modified) = match size_and_modified {
+            Ok(size_and_modified) => size_and_modified,
+            Err(error) => return self.skip(path, SkipReason::Unreadable(error.kind())),
+        };
+        if file_size == 0 {
+            return self.skip(path, SkipReason::EmptyFile);
+        }
+
+        self.report.files.push(ScannerFileEntry {
+            path,
+            file_size,
+            modified,
+        });
+        (self.on_file_found)(self.report.files.len());
+    }
+
+    fn skip(&mut self, path: PathBuf, reason: SkipReason) {
+        self.report.skipped.push(SkippedEntry { path, reason });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs::File,
+        io,
+        path::Path,
         time::{Duration, SystemTime},
     };
 
-    use model::ScannerFileEntry;
+    use model::{ScannerFileEntry, SkipReason, SkippedEntry};
     use tempfile::{TempDir, tempdir};
 
-    use crate::crawl_and_collect_files;
+    use crate::{ScannerError, crawl_and_collect_files};
 
     #[test]
     fn test_list_files_in_empty_folder() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
-        let files = crawl_and_collect_files(tempdir.path(), |_| {})?;
+        let files = crawl_and_collect_files(tempdir.path(), |_| {})?.files;
         assert!(files.is_empty());
         Ok(())
     }
@@ -63,7 +137,7 @@ mod tests {
 
         std::fs::write(&file_path, "contenu")?;
 
-        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?;
+        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?.files;
         assert_eq!(files.len(), 1);
         Ok(())
     }
@@ -79,7 +153,7 @@ mod tests {
             std::fs::write(&file_path, format!("content-{}", idx))?;
         }
 
-        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?;
+        let files = crawl_and_collect_files(temp_dir.path(), |_| {})?.files;
         assert_eq!(files.len(), AMOUNT_OF_FILES);
         Ok(())
     }
@@ -101,7 +175,7 @@ mod tests {
             }
         }
 
-        let files = crawl_and_collect_files(root_dir.path(), |_| {})?;
+        let files = crawl_and_collect_files(root_dir.path(), |_| {})?.files;
         assert_eq!(files.len(), AMOUNT_OF_BRANCHES * AMOUNT_OF_LEAFS);
         Ok(())
     }
@@ -142,7 +216,7 @@ mod tests {
             .open(&second_path)?
             .set_modified(second_modified)?;
 
-        let mut listed_files = crawl_and_collect_files(root_dir.path(), |_| {})?;
+        let mut listed_files = crawl_and_collect_files(root_dir.path(), |_| {})?.files;
         // read_dir order is filesystem-defined, so compare in path order.
         listed_files.sort_by(|left, right| left.path.cmp(&right.path));
 
@@ -160,6 +234,141 @@ mod tests {
                     modified: second_modified,
                 },
             ]
+        );
+        Ok(())
+    }
+
+    fn sorted_skips(mut skipped: Vec<SkippedEntry>) -> Vec<SkippedEntry> {
+        skipped.sort_by(|left, right| left.path.cmp(&right.path));
+        skipped
+    }
+
+    fn file_paths(files: &[ScannerFileEntry]) -> Vec<&Path> {
+        files.iter().map(|file| file.path.as_path()).collect()
+    }
+
+    #[test]
+    fn empty_files_are_skipped() -> anyhow::Result<()> {
+        let root = TempDir::new()?;
+        std::fs::write(root.path().join("empty"), "")?;
+        std::fs::write(root.path().join("full"), "x")?;
+
+        let report = crawl_and_collect_files(root.path(), |_| {})?;
+
+        assert_eq!(file_paths(&report.files), [root.path().join("full")]);
+        assert_eq!(
+            report.skipped,
+            [SkippedEntry {
+                path: root.path().join("empty"),
+                reason: SkipReason::EmptyFile,
+            }]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_skipped_and_never_followed() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new()?;
+        let real = root.path().join("real");
+        std::fs::create_dir(&real)?;
+        std::fs::write(real.join("file.txt"), "content")?;
+        symlink(&real, root.path().join("link_to_folder"))?;
+        symlink(real.join("file.txt"), root.path().join("link_to_file"))?;
+        // Followed, this one would walk the tree again and again.
+        symlink(root.path(), real.join("link_to_root"))?;
+
+        let report = crawl_and_collect_files(root.path(), |_| {})?;
+
+        assert_eq!(file_paths(&report.files), [real.join("file.txt")]);
+        assert_eq!(
+            sorted_skips(report.skipped),
+            [
+                SkippedEntry {
+                    path: root.path().join("link_to_file"),
+                    reason: SkipReason::Symlink,
+                },
+                SkippedEntry {
+                    path: root.path().join("link_to_folder"),
+                    reason: SkipReason::Symlink,
+                },
+                SkippedEntry {
+                    path: real.join("link_to_root"),
+                    reason: SkipReason::Symlink,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_skipped() -> anyhow::Result<()> {
+        use std::os::unix::net::UnixListener;
+
+        let root = TempDir::new()?;
+        let socket_path = root.path().join("socket");
+        let _listener = UnixListener::bind(&socket_path)?;
+
+        let report = crawl_and_collect_files(root.path(), |_| {})?;
+
+        assert!(report.files.is_empty());
+        assert_eq!(
+            report.skipped,
+            [SkippedEntry {
+                path: socket_path,
+                reason: SkipReason::SpecialFile,
+            }]
+        );
+        Ok(())
+    }
+
+    /// Needs a user that permissions apply to: root reads the locked folder anyway.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_is_skipped_with_its_reason_and_the_scan_goes_on() -> anyhow::Result<()>
+    {
+        use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+
+        const NO_ACCESS: u32 = 0o000;
+        const OWNER_FULL_ACCESS: u32 = 0o700;
+
+        let root = TempDir::new()?;
+        let locked = root.path().join("locked");
+        let open = root.path().join("open");
+        std::fs::create_dir(&locked)?;
+        std::fs::create_dir(&open)?;
+        std::fs::write(locked.join("hidden"), "hidden")?;
+        std::fs::write(open.join("visible"), "visible")?;
+        std::fs::set_permissions(&locked, Permissions::from_mode(NO_ACCESS))?;
+
+        let report = crawl_and_collect_files(root.path(), |_| {});
+        // Restore access first so the temporary folder can always be deleted.
+        std::fs::set_permissions(&locked, Permissions::from_mode(OWNER_FULL_ACCESS))?;
+        let report = report?;
+
+        assert_eq!(file_paths(&report.files), [open.join("visible")]);
+        assert_eq!(
+            report.skipped,
+            [SkippedEntry {
+                path: locked,
+                reason: SkipReason::Unreadable(io::ErrorKind::PermissionDenied),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_root_is_an_error() -> anyhow::Result<()> {
+        let parent = TempDir::new()?;
+
+        let result = crawl_and_collect_files(parent.path().join("missing"), |_| {});
+
+        assert!(
+            matches!(&result, Err(ScannerError::FileSystemError(error)) if error.kind() == io::ErrorKind::NotFound),
+            "{result:?}"
         );
         Ok(())
     }
