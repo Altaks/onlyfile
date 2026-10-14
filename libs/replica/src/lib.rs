@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use itertools::Itertools;
 use model::{DuplicateGroup, ScannerFileEntry};
 
-use crate::{
-    errors::ReplicaError,
-    signature::{content_hash_file, quick_hash_file},
-};
+use crate::signature::{content_hash_file, quick_hash_file};
+
+pub use crate::errors::ReplicaError;
 
 mod errors;
 mod signature;

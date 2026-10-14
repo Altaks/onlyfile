@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use crate::errors::ScannerError;
 use model::ScannerFileEntry;
+
+pub use crate::errors::ScannerError;
 
 mod errors;
 
