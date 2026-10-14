@@ -9,7 +9,7 @@ use std::{
 };
 
 use model::{DuplicateGroup, SkipReason, SkippedEntry};
-use replica::{ComparisonProgress, ReplicaError};
+use replica::ComparisonProgress;
 use scanner::ScannerError;
 use tracing::{error, info, warn};
 
@@ -42,8 +42,6 @@ pub struct ScanOutcome {
 pub enum PipelineError {
     #[error(transparent)]
     Scan(#[from] ScannerError),
-    #[error(transparent)]
-    Compare(#[from] ReplicaError),
     #[error("the worker stopped without a result")]
     WorkerStopped,
 }
@@ -78,17 +76,18 @@ fn scan_and_compare(
     let outcome = scanner::crawl_and_collect_files(root, |files_found| {
         report(PipelineProgress::Walking { files_found })
     })
-    .map_err(PipelineError::from)
-    .and_then(|scan| {
-        let groups = replica::detect_duplicates(&scan.files, |progress| {
+    .map(|mut scan| {
+        let comparison = replica::detect_duplicates(&scan.files, |progress| {
             report(PipelineProgress::Comparing(progress))
-        })?;
-        Ok(ScanOutcome {
+        });
+        scan.skipped.extend(comparison.skipped);
+        ScanOutcome {
             scanned_files: scan.files.len(),
-            groups,
+            groups: comparison.groups,
             skipped: scan.skipped,
-        })
-    });
+        }
+    })
+    .map_err(PipelineError::from);
 
     match &outcome {
         Ok(outcome) => {
