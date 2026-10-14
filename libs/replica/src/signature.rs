@@ -7,13 +7,13 @@ use crate::errors::ReplicaError;
 
 const FILE_CHUNK_SIZE: usize = 1024;
 
+/// Bytes read per call while streaming a whole file through the hasher.
+const CONTENT_HASH_BUFFER_SIZE: usize = 64 * 1024;
+
 pub(crate) async fn quick_hash_file(
     path: impl AsRef<Path>,
     file_size: u64,
 ) -> Result<u64, ReplicaError> {
-    // TODO : Make checks on this, it might make an unexpected behavior since it
-    // TODO : could detect two different files as similar if their sizes differ but not their start/middle/end chunks ? (If that makes any sense)
-
     // If the file is smaller than the size of a scannable chunk, then hash the whole file instead.
     if file_size <= FILE_CHUNK_SIZE as u64 {
         return hash_file(path).await;
@@ -45,6 +45,20 @@ pub(crate) async fn quick_hash_file(
     Ok(hash.digest())
 }
 
+pub(crate) async fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaError> {
+    let mut file_reader = tokio::fs::File::open(path).await?;
+    let mut hash = Xxh3::new();
+    let mut buffer = vec![0u8; CONTENT_HASH_BUFFER_SIZE];
+
+    loop {
+        let read_bytes_count = file_reader.read(&mut buffer).await?;
+        if read_bytes_count == 0 {
+            return Ok(hash.digest128());
+        }
+        hash.update(&buffer[..read_bytes_count]);
+    }
+}
+
 pub(crate) async fn hash_file(path: impl AsRef<Path>) -> Result<u64, ReplicaError> {
     let file_content = tokio::fs::read(path).await?;
     Ok(xxh3_64(&file_content))
@@ -55,6 +69,7 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
     use tokio::fs::File;
     use tokio::io::AsyncWriteExt;
+    use xxhash_rust::xxh3::xxh3_128;
 
     use super::*;
 
@@ -81,6 +96,29 @@ mod tests {
 
         let quick_hash = quick_hash_file(temp_file.path(), content.len() as u64).await?;
         assert_eq!(quick_hash, xxh3_64(&sampled_bytes));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_hash_streams_the_whole_file_across_buffer_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_file = NamedTempFile::new()?;
+        let content = position_dependent_content(2 * CONTENT_HASH_BUFFER_SIZE + 123);
+        tokio::fs::write(temp_file.path(), &content).await?;
+
+        assert_eq!(
+            content_hash_file(temp_file.path()).await?,
+            xxh3_128(&content)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_hash_of_an_empty_file_is_the_hash_of_no_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_file = NamedTempFile::new()?;
+
+        assert_eq!(content_hash_file(temp_file.path()).await?, xxh3_128(&[]));
         Ok(())
     }
 

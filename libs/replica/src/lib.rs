@@ -3,75 +3,68 @@ use std::collections::HashMap;
 use itertools::Itertools;
 use model::{HashedFileEntry, ScannerFileEntry};
 
-use crate::{errors::ReplicaError, signature::quick_hash_file};
+use crate::{
+    errors::ReplicaError,
+    signature::{content_hash_file, quick_hash_file},
+};
 
 mod errors;
 mod signature;
 
+/// Groups files whose whole content is identical. Each group is keyed by its first file in input
+/// order and lists the other copies.
+///
+/// Reading every byte of every file is the expensive part, so it only happens for files that
+/// already share a size and a sampled hash with another file.
 pub async fn detect_duplicates(
-    files: &mut [ScannerFileEntry],
+    files: &[ScannerFileEntry],
 ) -> Result<HashMap<HashedFileEntry, Vec<HashedFileEntry>>, ReplicaError> {
-    // Presort files list by their sizes
-    glidesort::sort_by_key(files, |it| it.file_size);
-
-    // Find files that have duplicates by size (appear more than once)
     let size_counts: HashMap<u64, usize> = files.iter().map(|it| it.file_size).counts();
 
-    let non_unique_files = files
-        .iter()
-        .filter(|it| size_counts[&it.file_size] > 1)
-        .collect_vec();
-
-    let mut non_unique_hashed_files = Vec::<HashedFileEntry>::with_capacity(non_unique_files.len());
-    for ScannerFileEntry { path, file_size } in non_unique_files {
-        non_unique_hashed_files.push(HashedFileEntry {
-            path: path.to_owned(),
-            file_size: *file_size,
-            hash: quick_hash_file(&path, *file_size).await?,
-        });
+    let mut candidates_by_sample = HashMap::<(u64, u64), Vec<HashedFileEntry>>::new();
+    for ScannerFileEntry { path, file_size } in
+        files.iter().filter(|it| size_counts[&it.file_size] > 1)
+    {
+        let hash = quick_hash_file(path, *file_size).await?;
+        candidates_by_sample
+            .entry((*file_size, hash))
+            .or_default()
+            .push(HashedFileEntry {
+                path: path.clone(),
+                file_size: *file_size,
+                hash,
+            });
     }
 
-    // Find files that have duplicates by hash (appear more than once)
-    let hash_counts: HashMap<u64, usize> =
-        non_unique_hashed_files.iter().map(|it| it.hash).counts();
-
-    let non_unique_grouped_files_by_size = non_unique_hashed_files
-        .iter()
-        .filter(|it| hash_counts[&it.hash] > 1) // Only files with duplicate hashes
-        .chunk_by(|it| it.file_size);
-
-    let non_unique_grouped_files_by_size_and_hashes = non_unique_grouped_files_by_size
-        .into_iter()
-        .map(|size_group| {
-            size_group
-                .1
-                .sorted_by_key(|hashed_entry| hashed_entry.hash)
-                .chunk_by(|hashed_entry| hashed_entry.hash)
-        });
-
     let mut duplicates_registry = HashMap::<HashedFileEntry, Vec<HashedFileEntry>>::new();
+    for candidates in candidates_by_sample
+        .into_values()
+        .filter(|candidates| candidates.len() > 1)
+    {
+        let mut copies_by_content = HashMap::<u128, Vec<HashedFileEntry>>::new();
+        for candidate in candidates {
+            let content_hash = content_hash_file(&candidate.path).await?;
+            copies_by_content
+                .entry(content_hash)
+                .or_default()
+                .push(candidate);
+        }
 
-    non_unique_grouped_files_by_size_and_hashes.for_each(|size_group| {
-        size_group.into_iter().for_each(|hash_group| {
-            let mut hash_group_iter = hash_group.1;
-
-            if let Some(first_file_entry) = hash_group_iter.next() {
-                let mut other_hashed_files = Vec::<HashedFileEntry>::new();
-                for entry in hash_group_iter {
-                    other_hashed_files.push(entry.clone());
-                }
-
-                duplicates_registry.insert(first_file_entry.clone(), other_hashed_files);
-            }
-        })
-    });
+        for mut copies in copies_by_content
+            .into_values()
+            .filter(|copies| copies.len() > 1)
+        {
+            let first_copy = copies.remove(0);
+            duplicates_registry.insert(first_copy, copies);
+        }
+    }
 
     Ok(duplicates_registry)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::{NamedTempFile, TempDir};
     use tokio::fs::File;
     use tokio::io::AsyncWriteExt;
@@ -86,11 +79,91 @@ mod tests {
         Ok(())
     }
 
+    /// Same length and same first, middle and last KiB as any other output of this function,
+    /// but `filler` fills every byte the sampled hash never reads.
+    fn content_sharing_sampled_chunks(filler: u8) -> Vec<u8> {
+        const CHUNK: usize = 1024;
+        [
+            vec![0x01; CHUNK],
+            vec![filler; 4 * CHUNK],
+            vec![0x02; CHUNK],
+            vec![filler; 4 * CHUNK],
+            vec![0x03; CHUNK],
+        ]
+        .concat()
+    }
+
+    fn scanner_entry(path: &Path, content: &[u8]) -> ScannerFileEntry {
+        ScannerFileEntry {
+            path: path.to_path_buf(),
+            file_size: content.len() as u64,
+        }
+    }
+
+    #[tokio::test]
+    async fn files_matching_only_on_sampled_chunks_are_not_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let original = temp_dir.path().join("original");
+        let lookalike = temp_dir.path().join("lookalike");
+        let original_content = content_sharing_sampled_chunks(0x00);
+        let lookalike_content = content_sharing_sampled_chunks(0xFF);
+        create_file(&original, &original_content).await?;
+        create_file(&lookalike, &lookalike_content).await?;
+
+        let files = vec![
+            scanner_entry(&original, &original_content),
+            scanner_entry(&lookalike, &lookalike_content),
+        ];
+        let duplicates = detect_duplicates(&files).await?;
+
+        assert!(duplicates.is_empty(), "reported {duplicates:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_splits_files_sharing_sampled_chunks() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = TempDir::new()?;
+        let original = temp_dir.path().join("original");
+        let copy = temp_dir.path().join("copy");
+        let lookalike = temp_dir.path().join("lookalike");
+        let shared_content = content_sharing_sampled_chunks(0x00);
+        let lookalike_content = content_sharing_sampled_chunks(0xFF);
+        create_file(&original, &shared_content).await?;
+        create_file(&copy, &shared_content).await?;
+        create_file(&lookalike, &lookalike_content).await?;
+
+        let files = vec![
+            scanner_entry(&original, &shared_content),
+            scanner_entry(&lookalike, &lookalike_content),
+            scanner_entry(&copy, &shared_content),
+        ];
+        let duplicates = detect_duplicates(&files).await?;
+
+        let mut grouped_paths: Vec<Vec<PathBuf>> = duplicates
+            .iter()
+            .map(|(first, others)| {
+                let mut paths: Vec<PathBuf> = std::iter::once(first)
+                    .chain(others)
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                paths.sort();
+                paths
+            })
+            .collect();
+        grouped_paths.sort();
+        let mut expected_group = vec![original, copy];
+        expected_group.sort();
+        assert_eq!(grouped_paths, vec![expected_group]);
+        Ok(())
+    }
+
     /// Test: Empty input returns empty result
     #[tokio::test]
     async fn empty_input() -> Result<(), Box<dyn std::error::Error>> {
-        let mut files = Vec::new();
-        let duplicates = detect_duplicates(&mut files).await?;
+        let files = Vec::new();
+        let duplicates = detect_duplicates(&files).await?;
         assert!(duplicates.is_empty());
         Ok(())
     }
@@ -102,8 +175,8 @@ mod tests {
         let path = temp_file.path().to_path_buf();
         create_file(&path, b"unique").await?;
 
-        let mut files = vec![ScannerFileEntry { path, file_size: 6 }];
-        let duplicates = detect_duplicates(&mut files).await?;
+        let files = vec![ScannerFileEntry { path, file_size: 6 }];
+        let duplicates = detect_duplicates(&files).await?;
         assert!(duplicates.is_empty());
         Ok(())
     }
@@ -118,7 +191,7 @@ mod tests {
         create_file(&file1, b"small").await?;
         create_file(&file2, b"much larger content").await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: 5,
@@ -129,7 +202,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
         assert!(duplicates.is_empty());
         Ok(())
     }
@@ -144,7 +217,7 @@ mod tests {
         create_file(&file1, b"content A").await?;
         create_file(&file2, b"content B").await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: 9,
@@ -155,7 +228,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
         assert!(duplicates.is_empty());
         Ok(())
     }
@@ -171,7 +244,7 @@ mod tests {
         create_file(&file1, content).await?;
         create_file(&file2, content).await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1.clone(),
                 file_size: content.len() as u64,
@@ -182,7 +255,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // With 2 identical files, should have 1 duplicate group
         assert_eq!(duplicates.len(), 1);
@@ -215,7 +288,7 @@ mod tests {
             create_file(path, content).await?;
         }
 
-        let mut scanner_files: Vec<_> = files
+        let scanner_files: Vec<_> = files
             .iter()
             .map(|path| ScannerFileEntry {
                 path: path.clone(),
@@ -223,7 +296,7 @@ mod tests {
             })
             .collect();
 
-        let duplicates = detect_duplicates(&mut scanner_files).await?;
+        let duplicates = detect_duplicates(&scanner_files).await?;
 
         // Should have one duplicate group
         assert_eq!(duplicates.len(), 1);
@@ -261,7 +334,7 @@ mod tests {
         create_file(&file4, content2).await?;
         create_file(&file5, content3).await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: content1.len() as u64,
@@ -284,7 +357,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should have two duplicate groups
         assert_eq!(duplicates.len(), 2);
@@ -309,7 +382,7 @@ mod tests {
         create_file(&file2, b"").await?;
         create_file(&file3, b"content").await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: 0,
@@ -324,7 +397,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should detect empty files as duplicates
         assert_eq!(duplicates.len(), 1);
@@ -350,7 +423,7 @@ mod tests {
         create_file(&file1, &binary_content).await?;
         create_file(&file2, &binary_content).await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: binary_content.len() as u64,
@@ -361,7 +434,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should detect binary files as duplicates
         assert_eq!(duplicates.len(), 1);
@@ -387,7 +460,7 @@ mod tests {
         create_file(&file1, &large_content).await?;
         create_file(&file2, &large_content).await?;
 
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file1,
                 file_size: large_content.len() as u64,
@@ -398,7 +471,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should detect large files as duplicates
         assert_eq!(duplicates.len(), 1);
@@ -414,7 +487,7 @@ mod tests {
     /// Test: Error handling for non-existent file
     #[tokio::test]
     async fn non_existent_file_error() {
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: PathBuf::from("/tmp/does_not_exist_12345.txt"),
                 file_size: 100,
@@ -425,7 +498,7 @@ mod tests {
             },
         ];
 
-        let result = detect_duplicates(&mut files).await;
+        let result = detect_duplicates(&files).await;
         assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
@@ -462,7 +535,7 @@ mod tests {
             }
         }
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should have exactly 2 duplicate groups
         assert_eq!(duplicates.len(), 2);
@@ -487,7 +560,7 @@ mod tests {
         create_file(&file2, content).await?;
 
         // Test with files in reverse order
-        let mut files = vec![
+        let files = vec![
             ScannerFileEntry {
                 path: file2.clone(),
                 file_size: content.len() as u64,
@@ -498,7 +571,7 @@ mod tests {
             },
         ];
 
-        let duplicates = detect_duplicates(&mut files).await?;
+        let duplicates = detect_duplicates(&files).await?;
 
         // Should still detect duplicates correctly
         assert_eq!(duplicates.len(), 1);
