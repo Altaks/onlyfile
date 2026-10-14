@@ -141,7 +141,11 @@ fn is_quit_key(key: KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::SystemTime};
+    use std::{
+        path::{MAIN_SEPARATOR, MAIN_SEPARATOR_STR},
+        sync::mpsc,
+        time::SystemTime,
+    };
 
     use model::{DuplicateGroup, ScannerFileEntry};
     use ratatui::{Terminal, backend::TestBackend};
@@ -159,9 +163,26 @@ mod tests {
         App::new(ROOT_LABEL.to_owned(), TimeZone::UTC, PathBuf::from(HOME))
     }
 
+    /// `relative_path` uses `/`; each segment is joined so the path is native on every platform.
+    fn photo_path(relative_path: &str) -> PathBuf {
+        relative_path
+            .split('/')
+            .fold(PathBuf::from(HOME).join("Photos"), |path, segment| {
+                path.join(segment)
+            })
+    }
+
+    /// How the screen writes [`photo_path`]: home as `~`, the platform's separator.
+    fn shown(relative_path: &str) -> String {
+        format!(
+            "~{MAIN_SEPARATOR}Photos{MAIN_SEPARATOR}{}",
+            relative_path.replace('/', MAIN_SEPARATOR_STR)
+        )
+    }
+
     fn copy(relative_path: &str, file_size: u64) -> ScannerFileEntry {
         ScannerFileEntry {
-            path: PathBuf::from(HOME).join("Photos").join(relative_path),
+            path: photo_path(relative_path),
             file_size,
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(MODIFIED_SECONDS),
         }
@@ -306,7 +327,7 @@ mod tests {
 
         row_containing(&rows, "big.mov · 4.0 KiB · 3 copies");
         for path in ["2023/big.mov", "dump/big.mov", "old/big (1).mov"] {
-            let copy_row = row_containing(&rows, &format!("~/Photos/{path}"));
+            let copy_row = row_containing(&rows, &shown(path));
             assert!(copy_row.contains("2024-01-12"), "{copy_row}");
         }
     }
@@ -320,7 +341,7 @@ mod tests {
         let rows = rendered_rows(&mut app, 100, 12);
 
         row_containing(&rows, "small.txt · 100 B · 2 copies");
-        row_containing(&rows, "~/Photos/old/small.txt");
+        row_containing(&rows, &shown("old/small.txt"));
     }
 
     #[test]
@@ -346,9 +367,9 @@ mod tests {
         let rows = rendered_rows(&mut app, 100, 12);
 
         row_containing(&rows, "big.mov · 4.0 KiB · 3 copies");
-        let second_copy = row_containing(&rows, "~/Photos/dump/big.mov");
+        let second_copy = row_containing(&rows, &shown("dump/big.mov"));
         assert!(
-            second_copy.contains("> ~/Photos/dump/big.mov"),
+            second_copy.contains(&format!("> {}", shown("dump/big.mov"))),
             "{second_copy}"
         );
     }
