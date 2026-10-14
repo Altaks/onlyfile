@@ -267,18 +267,37 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn symlink_folder(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(unix)]
+    fn symlink_file(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn symlink_folder(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[cfg(windows)]
+    fn symlink_file(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    /// On Windows, creating a symlink needs administrator rights or developer mode, which the CI
+    /// runners have.
     #[test]
     fn symlinks_are_skipped_and_never_followed() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
         let root = TempDir::new()?;
         let real = root.path().join("real");
         std::fs::create_dir(&real)?;
         std::fs::write(real.join("file.txt"), "content")?;
-        symlink(&real, root.path().join("link_to_folder"))?;
-        symlink(real.join("file.txt"), root.path().join("link_to_file"))?;
+        symlink_folder(&real, &root.path().join("link_to_folder"))?;
+        symlink_file(&real.join("file.txt"), &root.path().join("link_to_file"))?;
         // Followed, this one would walk the tree again and again.
-        symlink(root.path(), real.join("link_to_root"))?;
+        symlink_folder(root.path(), &real.join("link_to_root"))?;
 
         let report = crawl_and_collect_files(root.path(), |_| {})?;
 
