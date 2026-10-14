@@ -22,7 +22,11 @@ mod screens;
 const ERROR_PREFIX: &str = "onlyfile:";
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Find duplicate files in a folder.")]
+#[command(
+    version,
+    about = "Find duplicate files in a folder.",
+    bin_name = "onlyfile"
+)]
 struct Arguments {
     /// Folder to scan. Defaults to the current folder.
     path: Option<PathBuf>,
