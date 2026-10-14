@@ -1,4 +1,4 @@
-use std::{os::unix::fs::MetadataExt, path::Path};
+use std::path::Path;
 
 use crate::errors::ScannerError;
 use model::ScannerFileEntry;
@@ -20,7 +20,7 @@ pub async fn crawl_and_collect_files(
             if entry_path.is_dir() {
                 stack.push(entry_path);
             } else {
-                let file_size = entry.metadata().await?.size();
+                let file_size = entry.metadata().await?.len();
 
                 files_collector.push(ScannerFileEntry {
                     path: entry_path,
