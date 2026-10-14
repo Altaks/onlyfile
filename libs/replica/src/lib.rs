@@ -53,7 +53,10 @@ pub fn detect_duplicates(files: &[ScannerFileEntry]) -> Result<Vec<DuplicateGrou
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::SystemTime,
+    };
 
     use tempfile::TempDir;
 
@@ -71,6 +74,7 @@ mod tests {
                 let path = directory.join(name);
                 std::fs::write(&path, content)?;
                 Ok(ScannerFileEntry {
+                    modified: std::fs::metadata(&path)?.modified()?,
                     path,
                     file_size: content.len() as u64,
                 })
@@ -282,10 +286,12 @@ mod tests {
             ScannerFileEntry {
                 path: PathBuf::from("/tmp/does_not_exist_12345.txt"),
                 file_size: 100,
+                modified: SystemTime::UNIX_EPOCH,
             },
             ScannerFileEntry {
                 path: PathBuf::from("/tmp/does_not_exist_67890.txt"),
                 file_size: 100, // Same size to ensure processing
+                modified: SystemTime::UNIX_EPOCH,
             },
         ];
 

@@ -18,9 +18,11 @@ pub fn crawl_and_collect_files(
             if entry_path.is_dir() {
                 stack.push(entry_path);
             } else {
+                let metadata = entry.metadata()?;
                 files_collector.push(ScannerFileEntry {
                     path: entry_path,
-                    file_size: entry.metadata()?.len(),
+                    file_size: metadata.len(),
+                    modified: metadata.modified()?,
                 });
             }
         }
@@ -31,6 +33,10 @@ pub fn crawl_and_collect_files(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs::File,
+        time::{Duration, SystemTime},
+    };
 
     use model::ScannerFileEntry;
     use tempfile::{TempDir, tempdir};
@@ -96,30 +102,42 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregates_files_sizes_correctly() -> anyhow::Result<()> {
+    fn records_each_file_size_and_modification_time() -> anyhow::Result<()> {
         let root_dir = TempDir::new()?;
-
-        std::fs::write(root_dir.path().join("file1.tmp"), "Some content")?;
-        std::fs::write(root_dir.path().join("file2.tmp"), "Some content 2")?;
+        let first_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let second_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let first_path = root_dir.path().join("file1.tmp");
+        let second_path = root_dir.path().join("file2.tmp");
+        std::fs::write(&first_path, "Some content")?;
+        std::fs::write(&second_path, "Some content 2")?;
+        File::options()
+            .write(true)
+            .open(&first_path)?
+            .set_modified(first_modified)?;
+        File::options()
+            .write(true)
+            .open(&second_path)?
+            .set_modified(second_modified)?;
 
         let mut listed_files = crawl_and_collect_files(root_dir.path())?;
         // read_dir order is filesystem-defined, so compare in path order.
         listed_files.sort_by(|left, right| left.path.cmp(&right.path));
-        assert_eq!(
-            listed_files[0],
-            ScannerFileEntry {
-                path: root_dir.path().join("file1.tmp"),
-                file_size: 12u64,
-            }
-        );
-        assert_eq!(
-            listed_files[1],
-            ScannerFileEntry {
-                path: root_dir.path().join("file2.tmp"),
-                file_size: 14u64,
-            }
-        );
 
+        assert_eq!(
+            listed_files,
+            [
+                ScannerFileEntry {
+                    path: first_path,
+                    file_size: 12,
+                    modified: first_modified,
+                },
+                ScannerFileEntry {
+                    path: second_path,
+                    file_size: 14,
+                    modified: second_modified,
+                },
+            ]
+        );
         Ok(())
     }
 }

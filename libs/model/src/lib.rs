@@ -1,9 +1,11 @@
-use std::{fmt::Debug, hash::Hash, path::PathBuf};
+use std::{fmt::Debug, hash::Hash, path::PathBuf, time::SystemTime};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct ScannerFileEntry {
     pub path: PathBuf,
     pub file_size: u64,
+    /// Last modification instant, as the filesystem reports it.
+    pub modified: SystemTime,
 }
 
 /// One file below this is not a duplicate of anything.
@@ -34,6 +36,7 @@ mod tests {
         ScannerFileEntry {
             path: PathBuf::from(name),
             file_size: 1,
+            modified: SystemTime::UNIX_EPOCH,
         }
     }
 
