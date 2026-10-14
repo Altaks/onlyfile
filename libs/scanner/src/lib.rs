@@ -106,7 +106,9 @@ mod tests {
         tokio::fs::write(root_dir.path().join("file1.tmp"), "Some content").await?;
         tokio::fs::write(root_dir.path().join("file2.tmp"), "Some content 2").await?;
 
-        let listed_files = crawl_and_collect_files(root_dir.path()).await?;
+        let mut listed_files = crawl_and_collect_files(root_dir.path()).await?;
+        // read_dir order is filesystem-defined, so compare in path order.
+        listed_files.sort_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(
             listed_files[0],
             ScannerFileEntry {
