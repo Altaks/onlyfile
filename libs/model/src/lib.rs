@@ -6,13 +6,6 @@ pub struct ScannerFileEntry {
     pub file_size: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct HashedFileEntry {
-    pub path: PathBuf,
-    pub file_size: u64,
-    pub hash: u64,
-}
-
 /// One file below this is not a duplicate of anything.
 const MINIMUM_COPIES: usize = 2;
 

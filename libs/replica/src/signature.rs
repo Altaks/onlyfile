@@ -1,6 +1,9 @@
-use std::{io::SeekFrom, path::Path};
+use std::{
+    fs::File,
+    io::{ErrorKind, Read, Seek, SeekFrom},
+    path::Path,
+};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 use crate::errors::ReplicaError;
@@ -10,16 +13,13 @@ const FILE_CHUNK_SIZE: usize = 1024;
 /// Bytes read per call while streaming a whole file through the hasher.
 const CONTENT_HASH_BUFFER_SIZE: usize = 64 * 1024;
 
-pub(crate) async fn quick_hash_file(
-    path: impl AsRef<Path>,
-    file_size: u64,
-) -> Result<u64, ReplicaError> {
+pub(crate) fn quick_hash_file(path: impl AsRef<Path>, file_size: u64) -> Result<u64, ReplicaError> {
     // If the file is smaller than the size of a scannable chunk, then hash the whole file instead.
     if file_size <= FILE_CHUNK_SIZE as u64 {
-        return hash_file(path).await;
+        return hash_file(path);
     }
 
-    let mut file_reader = tokio::fs::File::open(&path).await?;
+    let mut file_reader = File::open(&path)?;
     let mut hash = Xxh3::new();
 
     //                                                        WHOLE FILE BYTES
@@ -36,8 +36,8 @@ pub(crate) async fn quick_hash_file(
 
     let mut chunk = [0u8; FILE_CHUNK_SIZE];
     for chunk_start in sampled_chunk_starts {
-        file_reader.seek(chunk_start).await?;
-        file_reader.read_exact(&mut chunk).await?;
+        file_reader.seek(chunk_start)?;
+        file_reader.read_exact(&mut chunk)?;
         hash.update(&chunk);
     }
 
@@ -45,30 +45,29 @@ pub(crate) async fn quick_hash_file(
     Ok(hash.digest())
 }
 
-pub(crate) async fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaError> {
-    let mut file_reader = tokio::fs::File::open(path).await?;
+pub(crate) fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaError> {
+    let mut file_reader = File::open(path)?;
     let mut hash = Xxh3::new();
     let mut buffer = vec![0u8; CONTENT_HASH_BUFFER_SIZE];
 
     loop {
-        let read_bytes_count = file_reader.read(&mut buffer).await?;
-        if read_bytes_count == 0 {
-            return Ok(hash.digest128());
+        match file_reader.read(&mut buffer) {
+            Ok(0) => return Ok(hash.digest128()),
+            Ok(read_bytes_count) => hash.update(&buffer[..read_bytes_count]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
         }
-        hash.update(&buffer[..read_bytes_count]);
     }
 }
 
-pub(crate) async fn hash_file(path: impl AsRef<Path>) -> Result<u64, ReplicaError> {
-    let file_content = tokio::fs::read(path).await?;
+pub(crate) fn hash_file(path: impl AsRef<Path>) -> Result<u64, ReplicaError> {
+    let file_content = std::fs::read(path)?;
     Ok(xxh3_64(&file_content))
 }
 
 #[cfg(test)]
 mod tests {
     use tempfile::{NamedTempFile, TempDir};
-    use tokio::fs::File;
-    use tokio::io::AsyncWriteExt;
     use xxhash_rust::xxh3::xxh3_128;
 
     use super::*;
@@ -79,12 +78,12 @@ mod tests {
         (0..length).map(|offset| (offset % 251) as u8).collect()
     }
 
-    #[tokio::test]
-    async fn quick_hash_covers_exactly_the_first_middle_and_last_chunks()
+    #[test]
+    fn quick_hash_covers_exactly_the_first_middle_and_last_chunks()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let content = position_dependent_content(5 * FILE_CHUNK_SIZE + 300);
-        tokio::fs::write(temp_file.path(), &content).await?;
+        std::fs::write(temp_file.path(), &content)?;
 
         let middle_start = content.len() / 2 - FILE_CHUNK_SIZE / 2;
         let sampled_bytes = [
@@ -94,49 +93,44 @@ mod tests {
         ]
         .concat();
 
-        let quick_hash = quick_hash_file(temp_file.path(), content.len() as u64).await?;
+        let quick_hash = quick_hash_file(temp_file.path(), content.len() as u64)?;
         assert_eq!(quick_hash, xxh3_64(&sampled_bytes));
         Ok(())
     }
 
-    #[tokio::test]
-    async fn content_hash_streams_the_whole_file_across_buffer_boundaries()
+    #[test]
+    fn content_hash_streams_the_whole_file_across_buffer_boundaries()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let content = position_dependent_content(2 * CONTENT_HASH_BUFFER_SIZE + 123);
-        tokio::fs::write(temp_file.path(), &content).await?;
+        std::fs::write(temp_file.path(), &content)?;
 
-        assert_eq!(
-            content_hash_file(temp_file.path()).await?,
-            xxh3_128(&content)
-        );
+        assert_eq!(content_hash_file(temp_file.path())?, xxh3_128(&content));
         Ok(())
     }
 
-    #[tokio::test]
-    async fn content_hash_of_an_empty_file_is_the_hash_of_no_bytes()
+    #[test]
+    fn content_hash_of_an_empty_file_is_the_hash_of_no_bytes()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
 
-        assert_eq!(content_hash_file(temp_file.path()).await?, xxh3_128(&[]));
+        assert_eq!(content_hash_file(temp_file.path())?, xxh3_128(&[]));
         Ok(())
     }
 
     /// Test hashing a small file (smaller than FILE_CHUNK_SIZE)
-    #[tokio::test]
-    async fn test_quick_hash_small_file() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_small_file() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
         // Write content smaller than FILE_CHUNK_SIZE
         let content = b"Hello, World!";
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, content)?;
 
         let file_size = content.len() as u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
-        let full_hash = hash_file(file_path).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
+        let full_hash = hash_file(file_path)?;
 
         // For small files, quick hash should equal full hash
         assert_eq!(quick_hash, full_hash);
@@ -145,20 +139,18 @@ mod tests {
     }
 
     /// Test hashing a file exactly equal to FILE_CHUNK_SIZE
-    #[tokio::test]
-    async fn test_quick_hash_exact_chunk_size_file() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_exact_chunk_size_file() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
         // Write content exactly FILE_CHUNK_SIZE bytes
         let content = vec![0x42u8; FILE_CHUNK_SIZE];
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(&content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, &content)?;
 
         let file_size = content.len() as u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
-        let full_hash = hash_file(file_path).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
+        let full_hash = hash_file(file_path)?;
 
         // For files exactly FILE_CHUNK_SIZE, quick hash should equal full hash
         assert_eq!(quick_hash, full_hash);
@@ -167,8 +159,8 @@ mod tests {
     }
 
     /// Test hashing a large file (larger than FILE_CHUNK_SIZE)
-    #[tokio::test]
-    async fn test_quick_hash_large_file() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_large_file() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
@@ -190,27 +182,25 @@ mod tests {
         // End section (last chunk)
         content.extend_from_slice(&[0x03u8; FILE_CHUNK_SIZE]);
 
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(&content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, &content)?;
 
         let file_size = content.len() as u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
 
         // The hash should be different from the full file hash
-        let full_hash = hash_file(file_path).await?;
+        let full_hash = hash_file(file_path)?;
         assert_ne!(quick_hash, full_hash);
 
         // But should be deterministic
-        let quick_hash2 = quick_hash_file(file_path, file_size).await?;
+        let quick_hash2 = quick_hash_file(file_path, file_size)?;
         assert_eq!(quick_hash, quick_hash2);
 
         Ok(())
     }
 
     /// Test that two identical files produce the same hash
-    #[tokio::test]
-    async fn test_quick_hash_identical_files() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_identical_files() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let file1_path = temp_dir.path().join("file1.txt");
         let file2_path = temp_dir.path().join("file2.txt");
@@ -219,14 +209,12 @@ mod tests {
 
         // Create two identical files
         for path in [&file1_path, &file2_path] {
-            let mut file: File = File::create(path).await?;
-            file.write_all(content).await?;
-            file.flush().await?;
+            std::fs::write(path, content)?;
         }
 
         let file_size = content.len() as u64;
-        let hash1 = quick_hash_file(&file1_path, file_size).await?;
-        let hash2 = quick_hash_file(&file2_path, file_size).await?;
+        let hash1 = quick_hash_file(&file1_path, file_size)?;
+        let hash2 = quick_hash_file(&file2_path, file_size)?;
 
         assert_eq!(hash1, hash2);
 
@@ -234,8 +222,8 @@ mod tests {
     }
 
     /// Test that two different files produce different hashes
-    #[tokio::test]
-    async fn test_quick_hash_different_files() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_different_files() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let file1_path = temp_dir.path().join("file1.txt");
         let file2_path = temp_dir.path().join("file2.txt");
@@ -244,16 +232,12 @@ mod tests {
         let content2 = b"This is different test content for hashing.";
 
         // Create two different files
-        let mut file1: File = File::create(&file1_path).await?;
-        file1.write_all(content1).await?;
-        file1.flush().await?;
+        std::fs::write(&file1_path, content1)?;
 
-        let mut file2: File = File::create(&file2_path).await?;
-        file2.write_all(content2).await?;
-        file2.flush().await?;
+        std::fs::write(&file2_path, content2)?;
 
-        let hash1 = quick_hash_file(&file1_path, content1.len() as u64).await?;
-        let hash2 = quick_hash_file(&file2_path, content2.len() as u64).await?;
+        let hash1 = quick_hash_file(&file1_path, content1.len() as u64)?;
+        let hash2 = quick_hash_file(&file2_path, content2.len() as u64)?;
 
         assert_ne!(hash1, hash2);
 
@@ -261,18 +245,17 @@ mod tests {
     }
 
     /// Test hashing an empty file
-    #[tokio::test]
-    async fn test_quick_hash_empty_file() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_empty_file() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
         // Create an empty file
-        let mut empty_file: File = File::create(file_path).await?;
-        empty_file.flush().await?;
+        std::fs::write(file_path, b"")?;
 
         let file_size = 0u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
-        let full_hash = hash_file(file_path).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
+        let full_hash = hash_file(file_path)?;
 
         // For empty files, both should be equal
         assert_eq!(quick_hash, full_hash);
@@ -281,8 +264,8 @@ mod tests {
     }
 
     /// Test that files with same start/middle/end but different middle content produce same quick hash
-    #[tokio::test]
-    async fn test_quick_hash_collision_scenario() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_collision_scenario() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let file1_path = temp_dir.path().join("file1.txt");
         let file2_path = temp_dir.path().join("file2.txt");
@@ -304,53 +287,47 @@ mod tests {
         content2.extend_from_slice(&[0x03u8; FILE_CHUNK_SIZE]); // Same end
 
         // Write both files
-        let mut file1: File = File::create(&file1_path).await?;
-        file1.write_all(&content1).await?;
-        file1.flush().await?;
+        std::fs::write(&file1_path, &content1)?;
 
-        let mut file2: File = File::create(&file2_path).await?;
-        file2.write_all(&content2).await?;
-        file2.flush().await?;
+        std::fs::write(&file2_path, &content2)?;
 
-        let hash1 = quick_hash_file(&file1_path, content1.len() as u64).await?;
-        let hash2 = quick_hash_file(&file2_path, content2.len() as u64).await?;
+        let hash1 = quick_hash_file(&file1_path, content1.len() as u64)?;
+        let hash2 = quick_hash_file(&file2_path, content2.len() as u64)?;
 
         // These should have the same quick hash since their start/middle/end chunks are identical
         assert_eq!(hash1, hash2);
 
         // But different full hashes
-        let full_hash1 = hash_file(&file1_path).await?;
-        let full_hash2 = hash_file(&file2_path).await?;
+        let full_hash1 = hash_file(&file1_path)?;
+        let full_hash2 = hash_file(&file2_path)?;
         assert_ne!(full_hash1, full_hash2);
 
         Ok(())
     }
 
     /// Test error handling for non-existent file
-    #[tokio::test]
-    async fn test_quick_hash_non_existent_file() {
+    #[test]
+    fn test_quick_hash_non_existent_file() {
         let non_existent_path = "/tmp/this_file_does_not_exist_12345.txt";
         let file_size = 100u64;
 
-        let result = quick_hash_file(non_existent_path, file_size).await;
+        let result = quick_hash_file(non_existent_path, file_size);
 
         assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
     /// Test error handling when file size doesn't match actual file size
-    #[tokio::test]
-    async fn test_quick_hash_incorrect_file_size() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_incorrect_file_size() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
         let content = b"Hello, World!";
-        let mut file = File::create(file_path).await?;
-        file.write_all(content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, content)?;
 
         // Pass an incorrect file size (larger than actual)
         let incorrect_size = 1000u64;
-        let result: Result<u64, ReplicaError> = quick_hash_file(file_path, incorrect_size).await;
+        let result: Result<u64, ReplicaError> = quick_hash_file(file_path, incorrect_size);
 
         // This should still work but may produce unexpected results
         // The function doesn't validate the file_size parameter
@@ -360,8 +337,8 @@ mod tests {
     }
 
     /// Test hashing a file with binary content
-    #[tokio::test]
-    async fn test_quick_hash_binary_content() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_binary_content() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
@@ -371,13 +348,11 @@ mod tests {
             0x42, 0x43,
         ];
 
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(&content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, &content)?;
 
         let file_size = content.len() as u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
-        let full_hash = hash_file(file_path).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
+        let full_hash = hash_file(file_path)?;
 
         // For small binary files, should be equal
         assert_eq!(quick_hash, full_hash);
@@ -386,26 +361,24 @@ mod tests {
     }
 
     /// Test edge case: file size is exactly 2 * FILE_CHUNK_SIZE
-    #[tokio::test]
-    async fn test_quick_hash_double_chunk_size() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_quick_hash_double_chunk_size() -> Result<(), Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path();
 
         // Create file exactly 4 * FILE_CHUNK_SIZE to ensure all chunk reads succeed
         let content = vec![0x55u8; 4 * FILE_CHUNK_SIZE];
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(&content).await?;
-        file.flush().await?;
+        std::fs::write(file_path, &content)?;
 
         let file_size = content.len() as u64;
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
+        let quick_hash = quick_hash_file(file_path, file_size)?;
 
         // Should be deterministic
-        let quick_hash2 = quick_hash_file(file_path, file_size).await?;
+        let quick_hash2 = quick_hash_file(file_path, file_size)?;
         assert_eq!(quick_hash, quick_hash2);
 
         // Should be different from full hash
-        let full_hash = hash_file(file_path).await?;
+        let full_hash = hash_file(file_path)?;
         assert_ne!(quick_hash, full_hash);
 
         Ok(())
