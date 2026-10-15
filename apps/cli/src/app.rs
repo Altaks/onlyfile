@@ -194,7 +194,7 @@ mod tests {
     use std::path::PathBuf;
 
     use jiff::tz::TimeZone;
-    use purge::Disposal;
+    use purge::{CopyRemoval, Disposal, RemovalOutcome};
     use tempfile::TempDir;
 
     use super::*;
@@ -1044,6 +1044,64 @@ mod tests {
 
         row_containing(&rows, "No duplicates found in …");
         row_containing(&rows, "/fit/Photos.");
+    }
+
+    /// Feeds the results of a removal straight to the screen, as the worker would.
+    fn finish_removal(app: &mut App, removed_copies: &[(&str, u64)]) {
+        let Screen::Results(results) = &mut app.screen else {
+            panic!("the results screen is shown");
+        };
+        let removed: Vec<CopyRemoval> = removed_copies
+            .iter()
+            .map(|(relative_path, file_size)| CopyRemoval {
+                path: photo_path(relative_path),
+                file_size: *file_size,
+                outcome: RemovalOutcome::Removed,
+            })
+            .collect();
+        results.on_removal_finished(&removed);
+    }
+
+    #[test]
+    fn a_move_to_the_trash_says_the_space_returns_once_the_trash_is_emptied() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        finish_removal(
+            &mut app,
+            &[("dump/big.mov", 4096), ("old/big (1).mov", 4096)],
+        );
+        let rows = rendered_rows(&mut app, 110, 16);
+
+        row_containing(
+            &rows,
+            "Moved 2 copies (8.0 KiB) to the trash; emptying the trash frees the space.",
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("freeing")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn once_everything_went_to_the_trash_the_empty_state_says_so() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        finish_removal(
+            &mut app,
+            &[
+                ("dump/big.mov", 4096),
+                ("old/big (1).mov", 4096),
+                ("old/small.txt", 100),
+            ],
+        );
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "No duplicates left in ~/Photos.");
+        row_containing(&rows, "8.1 KiB moved to the trash.");
     }
 
     #[test]

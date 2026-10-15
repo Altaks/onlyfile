@@ -65,18 +65,17 @@ impl RemovalSummary {
             .iter()
             .filter(|result| result.outcome == RemovalOutcome::Removed)
             .collect();
-        let freed_bytes: u64 = removed.iter().map(|result| result.file_size).sum();
+        let removed_bytes = format_bytes(removed.iter().map(|result| result.file_size).sum());
         let copies = format_quantity(removed.len(), "copy", "copies");
+        // The trash keeps what it receives: the space only comes back once it is emptied.
         let headline = match (removed.len(), disposal) {
             (0, _) => "No copy was removed.".to_owned(),
             (_, Disposal::Trash) => format!(
-                "Moved {copies} to the trash, freeing {}.",
-                format_bytes(freed_bytes)
+                "Moved {copies} ({removed_bytes}) to the trash; emptying the trash frees the space."
             ),
-            (_, Disposal::Permanent) => format!(
-                "Deleted {copies} permanently, freeing {}.",
-                format_bytes(freed_bytes)
-            ),
+            (_, Disposal::Permanent) => {
+                format!("Deleted {copies} permanently, freeing {removed_bytes}.")
+            }
         };
 
         let mut rows = vec![SummaryRow::text(headline)];

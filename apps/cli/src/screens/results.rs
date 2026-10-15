@@ -71,8 +71,8 @@ pub struct ResultsScreen {
     /// Why the last key did nothing, shown until the next key.
     notice: Option<String>,
     dialog: Option<RemovalDialog>,
-    /// Freed by every removal since the scan.
-    freed_bytes: u64,
+    /// Taken off the scanned folder by every removal since the scan.
+    removed_bytes: u64,
 }
 
 /// What the screen shows of one duplicate group.
@@ -182,7 +182,7 @@ impl ResultsScreen {
             copy_selection: ListState::default().with_selected(first_row),
             notice: None,
             dialog: None,
-            freed_bytes: 0,
+            removed_bytes: 0,
         }
     }
 
@@ -256,7 +256,7 @@ impl ResultsScreen {
             .filter(|result| result.outcome == RemovalOutcome::Removed)
             .map(|result| result.path.as_path())
             .collect();
-        self.freed_bytes += results
+        self.removed_bytes += results
             .iter()
             .filter(|result| removed.contains(result.path.as_path()))
             .map(|result| result.file_size)
@@ -404,7 +404,7 @@ impl ResultsScreen {
             Constraint::Fill(1),
         ])
         .areas(area);
-        let headline = if self.freed_bytes > 0 {
+        let headline = if self.removed_bytes > 0 {
             "No duplicates left in"
         } else {
             "No duplicates found in"
@@ -415,11 +415,13 @@ impl ResultsScreen {
             "{headline} {}.",
             truncate_start(&self.root_label, root_width)
         );
-        let lines = if self.freed_bytes > 0 {
-            vec![
-                Line::from(headline),
-                Line::from(format!("{} freed.", format_bytes(self.freed_bytes))),
-            ]
+        let lines = if self.removed_bytes > 0 {
+            let removed_bytes = format_bytes(self.removed_bytes);
+            let outcome = match self.disposal {
+                Disposal::Trash => format!("{removed_bytes} moved to the trash."),
+                Disposal::Permanent => format!("{removed_bytes} freed."),
+            };
+            vec![Line::from(headline), Line::from(outcome)]
         } else {
             let scanned = format_quantity(self.scanned_files, "file", "files");
             let totals = if self.skipped.is_empty() {
