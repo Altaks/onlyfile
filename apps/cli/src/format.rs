@@ -22,8 +22,11 @@ const THOUSANDS_SEPARATOR: char = ' ';
 const ELLIPSIS: char = '…';
 const ELLIPSIS_WIDTH: usize = 1;
 
-/// Shown when the filesystem reports an instant outside the years -9999 to 9999.
-const UNKNOWN_DATE: &str = "unknown date";
+/// Every date [`format_date`] writes is this many cells wide, `YYYY-MM-DD` included.
+pub const DATE_WIDTH: usize = 10;
+/// Shown when the filesystem reports an instant outside the years -9999 to 9999. Fits in
+/// [`DATE_WIDTH`].
+const UNKNOWN_DATE: &str = "no date";
 const HOME_PREFIX: &str = "~";
 
 /// `512 B`, `3.1 GiB`, `412 MiB`.
@@ -198,6 +201,23 @@ mod tests {
         assert_eq!(
             format_date(instant, &TimeZone::fixed(Offset::constant(-5))),
             "2024-01-11"
+        );
+    }
+
+    #[test]
+    fn an_instant_outside_the_calendar_still_fits_the_date_column() {
+        const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
+        let far_future = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(20_000 * SECONDS_PER_YEAR))
+            .expect("representable by the system clock");
+
+        let date = format_date(far_future, &TimeZone::UTC);
+
+        assert_eq!(date, "no date");
+        assert!(date.width() <= DATE_WIDTH);
+        assert_eq!(
+            format_date(SystemTime::UNIX_EPOCH, &TimeZone::UTC).width(),
+            DATE_WIDTH
         );
     }
 

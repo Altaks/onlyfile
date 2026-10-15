@@ -16,7 +16,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     format::{
-        format_bytes, format_date, format_path, format_quantity, truncate_end, truncate_start,
+        DATE_WIDTH, format_bytes, format_date, format_path, format_quantity, truncate_end,
+        truncate_start,
     },
     pipeline::ScanOutcome,
     screens::screen_title,
@@ -26,8 +27,6 @@ const GROUPS_PANE_PERCENT: u16 = 35;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 /// `1023 MiB` is the widest a size gets below 1024 PiB.
 const GROUP_SIZE_WIDTH: usize = 8;
-/// A modified date is `YYYY-MM-DD`.
-const DATE_COLUMN_WIDTH: usize = 10;
 const COLUMN_GAP: &str = "  ";
 /// One cell for the left border, one for the right.
 const BORDER_CELLS: u16 = 2;
@@ -183,7 +182,7 @@ impl ResultsScreen {
         );
 
         let path_width = usize::from(copies_area.width.saturating_sub(BORDER_CELLS))
-            .saturating_sub(HIGHLIGHT_SYMBOL.width() + COLUMN_GAP.width() + DATE_COLUMN_WIDTH);
+            .saturating_sub(HIGHLIGHT_SYMBOL.width() + COLUMN_GAP.width() + DATE_WIDTH);
         let Some(group) = self.selected_group() else {
             return;
         };
