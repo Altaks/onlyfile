@@ -5,7 +5,7 @@ use std::path::Path;
 use purge::{CopyRemoval, Disposal, RemovalOutcome};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     text::Line,
     widgets::{Block, Clear, Gauge, ListState, Paragraph, Wrap},
 };
@@ -13,10 +13,13 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     format::{format_bytes, format_path, format_quantity, format_removal_outcome, truncate_start},
-    screens::{BORDER_CELLS, HIGHLIGHT_SYMBOL, Step, done_share, pane_list, step_selection},
+    screens::{
+        BORDER_CELLS, HIGHLIGHT_SYMBOL, Step, centered, done_share, pane_list, step_selection,
+        text_dialog_area,
+    },
 };
 
-const DIALOG_WIDTH_PERCENT: u16 = 70;
+const PROGRESS_WIDTH_PERCENT: u16 = 70;
 /// Two borders around a line of text and a gauge.
 const PROGRESS_HEIGHT: u16 = 4;
 const SUMMARY_WIDTH_PERCENT: u16 = 90;
@@ -164,18 +167,10 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
                 "Each one is first compared byte for byte with the copy its group keeps."
                     .to_owned(),
             ];
-            let width = dialog_width(area);
             let text = Paragraph::new(lines.map(Line::from).to_vec())
                 .wrap(Wrap { trim: true })
                 .block(Block::bordered().title(" Remove marked copies "));
-            // Measured by the paragraph's own word wrapping, borders included, so the box is
-            // exactly as tall as the text it will draw.
-            let height = text.line_count(width.saturating_sub(BORDER_CELLS));
-            let dialog_area = centered(
-                area,
-                Constraint::Length(width),
-                Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX)),
-            );
+            let dialog_area = text_dialog_area(area, &text);
             frame.render_widget(Clear, dialog_area);
             frame.render_widget(text, dialog_area);
         }
@@ -191,7 +186,7 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
             };
             let dialog_area = centered(
                 area,
-                Constraint::Percentage(DIALOG_WIDTH_PERCENT),
+                Constraint::Percentage(PROGRESS_WIDTH_PERCENT),
                 Constraint::Length(PROGRESS_HEIGHT),
             );
             let block = Block::bordered().title(" Removing ");
@@ -237,19 +232,4 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
             );
         }
     }
-}
-
-/// The width of a dialog drawn over `area`.
-fn dialog_width(area: Rect) -> u16 {
-    let [dialog] = Layout::horizontal([Constraint::Percentage(DIALOG_WIDTH_PERCENT)])
-        .flex(Flex::Center)
-        .areas(area);
-    dialog.width
-}
-
-/// A box of the given size in the middle of `area`.
-fn centered(area: Rect, width: Constraint, height: Constraint) -> Rect {
-    let [row] = Layout::vertical([height]).flex(Flex::Center).areas(area);
-    let [dialog] = Layout::horizontal([width]).flex(Flex::Center).areas(row);
-    dialog
 }

@@ -1,12 +1,14 @@
 use purge::GroupRemoval;
 use ratatui::{
+    layout::{Constraint, Flex, Layout, Rect},
     style::{Modifier, Style},
-    widgets::{Block, List, ListState},
+    widgets::{Block, List, ListState, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::format::truncate_start;
 
+pub mod help;
 pub mod removal;
 pub mod results;
 pub mod scanning;
@@ -18,6 +20,7 @@ const CORNER_CELLS: usize = 2;
 pub const HIGHLIGHT_SYMBOL: &str = "> ";
 /// One cell for the left border, one for the right.
 pub const BORDER_CELLS: u16 = 2;
+const DIALOG_WIDTH_PERCENT: u16 = 70;
 
 /// Whether a screen used a key, left it to the application (to quit, for instance), or asks the
 /// application to start removing copies.
@@ -83,6 +86,27 @@ pub fn done_share(done: u64, total: u64) -> f64 {
     } else {
         (done as f64 / total as f64).min(1.0)
     }
+}
+
+/// A box of the given size in the middle of `area`.
+pub fn centered(area: Rect, width: Constraint, height: Constraint) -> Rect {
+    let [row] = Layout::vertical([height]).flex(Flex::Center).areas(area);
+    let [dialog] = Layout::horizontal([width]).flex(Flex::Center).areas(row);
+    dialog
+}
+
+/// Where a bordered, wrapped paragraph goes in the middle of `area`: a set share of the width, and
+/// exactly as tall as the paragraph's own wrapping makes it at that width, borders included.
+pub fn text_dialog_area(area: Rect, text: &Paragraph) -> Rect {
+    let [row] = Layout::horizontal([Constraint::Percentage(DIALOG_WIDTH_PERCENT)])
+        .flex(Flex::Center)
+        .areas(area);
+    let height = text.line_count(row.width.saturating_sub(BORDER_CELLS));
+    centered(
+        area,
+        Constraint::Length(row.width),
+        Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX)),
+    )
 }
 
 #[cfg(test)]

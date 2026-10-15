@@ -522,7 +522,7 @@ mod tests {
 
         row_containing(
             &rows,
-            " ↑↓ move  tab switch pane  space mark  k keep this  d remove marked  s skipped (3)  q quit ",
+            " tab pane  space mark  k keep  d remove  s skipped (3)  ? help  q quit ",
         );
     }
 
@@ -575,7 +575,7 @@ mod tests {
             "{}",
             listed[2]
         );
-        row_containing(&rows, " ↑↓ move  esc back  q quit ");
+        row_containing(&rows, " ↑↓ move  esc back  ? help  q quit ");
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
 
         let rows = rendered_rows(&mut app, 80, 12);
         row_containing(&rows, "3 files scanned, 3 skipped.");
-        row_containing(&rows, " s skipped (3)  q quit ");
+        row_containing(&rows, " s skipped (3)  ? help  q quit ");
 
         press(&mut app, KeyCode::Char('s'));
         row_containing(&rendered_rows(&mut app, 80, 12), "Skipped · 3 entries");
@@ -644,7 +644,7 @@ mod tests {
         }
         row_containing(
             &rows,
-            " ↑↓ move  tab switch pane  space mark  k keep this  d remove marked  q quit ",
+            " tab pane  space mark  k keep  d remove  ? help  q quit ",
         );
         assert!(!rows[0].contains("marked"), "{}", rows[0]);
     }
@@ -1257,6 +1257,92 @@ mod tests {
         app.drain_removal_events();
 
         assert!(matches!(app.exit, Some(AppExit::RemovalInterrupted)));
+    }
+
+    #[test]
+    fn question_mark_lists_every_key_and_the_rules() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('?'));
+        let rows = rendered_rows(&mut app, 120, 30);
+
+        row_containing(&rows, " Help ");
+        for line in [
+            "↑ ↓      move in the focused list",
+            "tab      switch between the groups and the copies",
+            "space    mark or unmark the highlighted copy",
+            "k        keep the highlighted copy, mark the rest",
+            "d        remove the marked copies, after asking",
+            "s        list the entries the scan skipped",
+            "enter    close the removal summary",
+            "?        show or hide this help",
+            "q, esc   quit",
+            "ctrl-c   quit at any time",
+            "Every group keeps at least one copy.",
+            "Removed copies go to the trash, where they can be restored.",
+        ] {
+            row_containing(&rows, line);
+        }
+        row_containing(&rows, " ? or esc close  q quit ");
+    }
+
+    #[test]
+    fn the_help_says_when_removed_copies_are_deleted_for_good() {
+        let (_home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('?'));
+
+        row_containing(
+            &rendered_rows(&mut app, 120, 30),
+            "This run was started with --permanent: removed copies are deleted for good.",
+        );
+    }
+
+    #[test]
+    fn question_mark_or_esc_close_the_help_and_other_keys_wait() {
+        for close in [KeyCode::Char('?'), KeyCode::Esc] {
+            let mut app = app();
+            app.on_pipeline_event(two_groups());
+
+            press(&mut app, KeyCode::Char('?'));
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, close);
+            let rows = rendered_rows(&mut app, 120, 30);
+
+            assert!(app.exit.is_none(), "{close:?}");
+            assert!(rows.iter().all(|row| !row.contains(" Help ")), "{close:?}");
+            assert!(
+                !rows[0].contains("marked"),
+                "k reached the list under the help: {}",
+                rows[0]
+            );
+        }
+    }
+
+    #[test]
+    fn q_quits_from_the_help() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('q'));
+
+        assert!(matches!(app.exit, Some(AppExit::Quit)));
+    }
+
+    #[test]
+    fn the_help_opens_from_the_skipped_list_and_the_empty_state_too() {
+        let mut skipped = app();
+        skipped.on_pipeline_event(two_groups_and_three_skips());
+        press(&mut skipped, KeyCode::Char('s'));
+        press(&mut skipped, KeyCode::Char('?'));
+        row_containing(&rendered_rows(&mut skipped, 120, 30), " Help ");
+
+        let mut empty = app();
+        empty.on_pipeline_event(finished(3, Vec::new()));
+        press(&mut empty, KeyCode::Char('?'));
+        row_containing(&rendered_rows(&mut empty, 120, 30), " Help ");
     }
 
     #[test]
