@@ -6,9 +6,17 @@ license = "MIT"
 
 [workspace]
 resolver = "3"
-members = ["apps/cli", "libs/model", "libs/purge", "libs/replica", "libs/scanner"]
+members = [
+    "apps/cli",
+    "libs/identity",
+    "libs/model",
+    "libs/purge",
+    "libs/replica",
+    "libs/scanner",
+]
 
 [workspace.dependencies]
+identity = { path = "libs/identity" }
 model = { path = "libs/model" }
 purge = { path = "libs/purge" }
 replica = { path = "libs/replica" }

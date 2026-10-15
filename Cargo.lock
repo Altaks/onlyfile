@@ -630,6 +630,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "identity"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "winapi-util",
+]
+
+[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1345,10 +1353,10 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 name = "replica"
 version = "0.1.0"
 dependencies = [
+ "identity",
  "itertools",
  "model",
  "tempfile",
- "winapi-util",
  "xxhash-rust",
 ]
 
