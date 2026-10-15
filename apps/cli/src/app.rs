@@ -994,6 +994,28 @@ mod tests {
     }
 
     #[test]
+    fn keeping_a_later_copy_removes_the_ones_before_and_after_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+
+        row_containing(
+            &rendered_rows(&mut app, 110, 16),
+            "Deleted 2 copies permanently, freeing 56 B.",
+        );
+        assert!(!real_path(&home, "a/photo.jpg").exists());
+        assert_eq!(std::fs::read(real_path(&home, "b/photo.jpg"))?, PHOTO);
+        assert!(!real_path(&home, "c/photo.jpg").exists());
+        Ok(())
+    }
+
+    #[test]
     fn after_the_summary_the_emptied_group_is_gone() {
         let (_home, mut app) = real_duplicates();
 
