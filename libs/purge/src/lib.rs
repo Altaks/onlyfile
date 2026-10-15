@@ -1,5 +1,5 @@
-//! Removes duplicate copies, each only after proving it still matches, byte for byte, a copy that
-//! stays.
+//! Removes duplicate copies, each only after proving it is a different file that still matches,
+//! byte for byte, the copy that stays.
 
 use std::{
     fs::File,
@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use identity::FileIdentity;
 use trash::TrashContext;
 #[cfg(target_os = "macos")]
 use trash::macos::{DeleteMethod, TrashContextExtMacos};
@@ -47,6 +48,9 @@ pub enum RemovalOutcome {
     Removed,
     /// Left in place: it no longer matches the kept copy.
     ChangedSinceScan,
+    /// Left in place: this path now leads to the kept file itself (a hardlink, or a folder
+    /// replaced by a symlink), so removing it would remove the copy that has to stay.
+    SameFileAsKept,
     /// Left in place: the copy could not be read for the comparison.
     CopyUnreadable(ErrorKind),
     /// Left in place: the kept copy could not be read, so nothing proves this one is a duplicate.
@@ -74,9 +78,10 @@ pub fn remove_copies(
     let mut results = Vec::new();
     for removal in removals {
         for copy in &removal.removed {
-            let outcome = match same_content(copy, &removal.kept) {
-                Ok(true) => dispose(copy, disposal, &trash),
-                Ok(false) => RemovalOutcome::ChangedSinceScan,
+            let outcome = match compare(copy, &removal.kept) {
+                Ok(Comparison::Identical) => dispose(copy, disposal, &trash),
+                Ok(Comparison::Different) => RemovalOutcome::ChangedSinceScan,
+                Ok(Comparison::SameFile) => RemovalOutcome::SameFileAsKept,
                 Err(Unreadable::Copy(kind)) => RemovalOutcome::CopyUnreadable(kind),
                 Err(Unreadable::Kept(kind)) => RemovalOutcome::KeptCopyUnreadable(kind),
             };
@@ -98,11 +103,26 @@ enum Unreadable {
     Kept(ErrorKind),
 }
 
-fn same_content(copy: &Path, kept: &Path) -> Result<bool, Unreadable> {
+enum Comparison {
+    Identical,
+    Different,
+    /// Both paths lead to one file, whose content is then trivially identical.
+    SameFile,
+}
+
+fn compare(copy: &Path, kept: &Path) -> Result<Comparison, Unreadable> {
     let copy_error = |error: io::Error| Unreadable::Copy(error.kind());
     let kept_error = |error: io::Error| Unreadable::Kept(error.kind());
     let mut copy_file = File::open(copy).map_err(copy_error)?;
     let mut kept_file = File::open(kept).map_err(kept_error)?;
+    // Checked on the open handles, so it is the files being compared that are told apart, whatever
+    // the paths went through to reach them.
+    if FileIdentity::of_file(&copy_file).map_err(copy_error)?
+        == FileIdentity::of_file(&kept_file).map_err(kept_error)?
+    {
+        return Ok(Comparison::SameFile);
+    }
+
     let mut copy_buffer = vec![0; COMPARISON_BUFFER_SIZE];
     let mut kept_buffer = vec![0; COMPARISON_BUFFER_SIZE];
 
@@ -110,10 +130,10 @@ fn same_content(copy: &Path, kept: &Path) -> Result<bool, Unreadable> {
         let copy_read = fill(&mut copy_file, &mut copy_buffer).map_err(copy_error)?;
         let kept_read = fill(&mut kept_file, &mut kept_buffer).map_err(kept_error)?;
         if copy_buffer[..copy_read] != kept_buffer[..kept_read] {
-            return Ok(false);
+            return Ok(Comparison::Different);
         }
         if copy_read == 0 {
-            return Ok(true);
+            return Ok(Comparison::Identical);
         }
     }
 }
@@ -281,6 +301,49 @@ mod tests {
                 (identical.as_path(), &RemovalOutcome::Removed),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_name_of_the_kept_file_is_left_alone() -> std::io::Result<()> {
+        let folder = TempDir::new()?;
+        let kept = write(&folder.path().join("kept"), CONTENT);
+        let second_name = folder.path().join("second_name");
+        std::fs::hard_link(&kept, &second_name)?;
+
+        let results = remove_copies(
+            &[removal(&kept, &[&second_name])],
+            Disposal::Permanent,
+            |_| {},
+        );
+
+        assert_eq!(
+            outcomes(&results),
+            [(second_name.as_path(), &RemovalOutcome::SameFileAsKept)]
+        );
+        assert!(second_name.exists() && kept.exists());
+        Ok(())
+    }
+
+    /// The folder of a copy became a symlink to the kept copy's folder after the scan: both paths
+    /// now name the kept file, and removing the "copy" would remove it.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_reached_through_a_symlinked_folder_is_not_removed() -> std::io::Result<()> {
+        let folder = TempDir::new()?;
+        let kept_folder = folder.path().join("a");
+        std::fs::create_dir(&kept_folder)?;
+        let kept = write(&kept_folder.join("photo.jpg"), CONTENT);
+        std::os::unix::fs::symlink(&kept_folder, folder.path().join("b"))?;
+        let alias = folder.path().join("b").join("photo.jpg");
+
+        let results = remove_copies(&[removal(&kept, &[&alias])], Disposal::Permanent, |_| {});
+
+        assert_eq!(
+            outcomes(&results),
+            [(alias.as_path(), &RemovalOutcome::SameFileAsKept)]
+        );
+        assert_eq!(std::fs::read(&kept)?, CONTENT);
         Ok(())
     }
 

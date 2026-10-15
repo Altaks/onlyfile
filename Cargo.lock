@@ -1182,6 +1182,7 @@ dependencies = [
 name = "purge"
 version = "0.1.0"
 dependencies = [
+ "identity",
  "tempfile",
  "trash",
 ]
