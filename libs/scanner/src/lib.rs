@@ -58,8 +58,13 @@ impl<OnFileFound: FnMut(usize)> Crawler<OnFileFound> {
         for entry in listing {
             match entry {
                 Ok(entry) => self.visit(entry),
-                // The listing failed partway, and the entry it could not read has no name yet.
-                Err(error) => self.skip(folder.to_path_buf(), SkipReason::Unreadable(error.kind())),
+                // The listing failed partway, and the entry it could not read has no name yet. On
+                // Windows the next call asks the system again and can fail the same way forever, so
+                // the rest of this folder is given up rather than retried.
+                Err(error) => {
+                    self.skip(folder.to_path_buf(), SkipReason::Unreadable(error.kind()));
+                    break;
+                }
             }
         }
     }
