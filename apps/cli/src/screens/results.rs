@@ -1,10 +1,14 @@
 //! The two-pane screen: duplicate groups on the left, the copies of the selected group on the right,
-//! and the list of skipped entries one key away.
+//! the list of skipped entries one key away, and the removal of marked copies.
 
-use std::path::Path;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use jiff::tz::TimeZone;
 use model::DuplicateGroup;
+use purge::{CopyRemoval, Disposal, GroupRemoval, RemovalOutcome};
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
@@ -21,9 +25,13 @@ use crate::{
     },
     pipeline::ScanOutcome,
     screens::{
-        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, pane_list, screen_title,
-        skipped::SkippedList, step_selection,
+        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, pane_list,
+        removal::{self, RemovalDialog, RemovalSummary},
+        screen_title,
+        skipped::SkippedList,
+        step_selection,
     },
+    settings::RunSettings,
 };
 
 const GROUPS_PANE_PERCENT: u16 = 35;
@@ -50,8 +58,10 @@ enum Pane {
 #[derive(Debug)]
 pub struct ResultsScreen {
     root_label: String,
+    home: PathBuf,
+    disposal: Disposal,
+    log_label: String,
     scanned_files: usize,
-    reclaimable_bytes: u64,
     groups: Vec<GroupView>,
     skipped: SkippedList,
     view: View,
@@ -60,23 +70,24 @@ pub struct ResultsScreen {
     copy_selection: ListState,
     /// Why the last key did nothing, shown until the next key.
     notice: Option<String>,
+    dialog: Option<RemovalDialog>,
+    /// Freed by every removal since the scan.
+    freed_bytes: u64,
 }
 
-/// What the screen shows of one duplicate group, formatted once when the results arrive.
+/// What the screen shows of one duplicate group.
 #[derive(Debug)]
 struct GroupView {
-    /// `IMG_2041.mov`, the first copy's file name.
+    /// `IMG_2041.mov`, the first copy's file name at the scan.
     name: String,
     file_size: u64,
-    /// `412 MiB ×3 IMG_2041.mov`
-    row: String,
-    /// `IMG_2041.mov · 412 MiB · 3 copies`
-    title: String,
     copies: Vec<CopyView>,
 }
 
 #[derive(Debug)]
 struct CopyView {
+    source: PathBuf,
+    /// The path as the screen writes it, home shown as `~`.
     path: String,
     modified_date: String,
     marked: bool,
@@ -85,22 +96,17 @@ struct CopyView {
 impl GroupView {
     fn new(group: &DuplicateGroup, time_zone: &TimeZone, home: &Path) -> Self {
         let first_path = &group.copies()[0].path;
-        let name = first_path.file_name().map_or_else(
-            || first_path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let size_label = format_bytes(group.file_size());
-        let copy_count = group.copies().len();
-
         Self {
-            row: format!("{size_label:>GROUP_SIZE_WIDTH$} ×{copy_count} {name}"),
-            title: format!(" {name} · {size_label} · {copy_count} copies "),
-            name,
+            name: first_path.file_name().map_or_else(
+                || first_path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             file_size: group.file_size(),
             copies: group
                 .copies()
                 .iter()
                 .map(|copy| CopyView {
+                    source: copy.path.clone(),
                     path: format_path(&copy.path, home),
                     modified_date: format_date(copy.modified, time_zone),
                     marked: false,
@@ -108,15 +114,47 @@ impl GroupView {
                 .collect(),
         }
     }
+
+    /// `412 MiB ×3 IMG_2041.mov`
+    fn row(&self) -> String {
+        format!(
+            "{:>GROUP_SIZE_WIDTH$} ×{} {}",
+            format_bytes(self.file_size),
+            self.copies.len(),
+            self.name
+        )
+    }
+
+    /// `IMG_2041.mov · 412 MiB · 3 copies`
+    fn title(&self) -> String {
+        format!(
+            " {} · {} · {} copies ",
+            self.name,
+            format_bytes(self.file_size),
+            self.copies.len()
+        )
+    }
+
+    fn reclaimable_bytes(&self) -> u64 {
+        self.file_size * (self.copies.len() as u64 - 1)
+    }
+
+    /// What removing this group's marked copies takes, or `None` when none is marked. The first
+    /// unmarked copy is the one every removed copy is compared with.
+    fn removal(&self) -> Option<GroupRemoval> {
+        let kept = self.copies.iter().find(|copy| !copy.marked)?;
+        let removed = self
+            .copies
+            .iter()
+            .filter(|copy| copy.marked)
+            .map(|copy| copy.source.clone())
+            .collect();
+        GroupRemoval::new(kept.source.clone(), removed, self.file_size)
+    }
 }
 
 impl ResultsScreen {
-    pub fn new(
-        outcome: ScanOutcome,
-        root_label: String,
-        time_zone: &TimeZone,
-        home: &Path,
-    ) -> Self {
+    pub fn new(outcome: ScanOutcome, settings: &RunSettings) -> Self {
         let mut groups = outcome.groups;
         // Largest gain first. The first copy's path breaks ties so the order is the same every run.
         groups.sort_by(|left, right| {
@@ -128,24 +166,59 @@ impl ResultsScreen {
         let first_row = (!groups.is_empty()).then_some(0);
 
         Self {
-            root_label,
+            root_label: settings.root_label.clone(),
+            home: settings.home.clone(),
+            disposal: settings.disposal,
+            log_label: settings.log_label.clone(),
             scanned_files: outcome.scanned_files,
-            reclaimable_bytes: groups.iter().map(DuplicateGroup::reclaimable_bytes).sum(),
             groups: groups
                 .iter()
-                .map(|group| GroupView::new(group, time_zone, home))
+                .map(|group| GroupView::new(group, &settings.time_zone, &settings.home))
                 .collect(),
-            skipped: SkippedList::new(outcome.skipped, home),
+            skipped: SkippedList::new(outcome.skipped, &settings.home),
             view: View::Duplicates,
             focus: Pane::Groups,
             group_selection: ListState::default().with_selected(first_row),
             copy_selection: ListState::default().with_selected(first_row),
             notice: None,
+            dialog: None,
+            freed_bytes: 0,
         }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> KeyHandling {
         self.notice = None;
+        if let Some(dialog) = &mut self.dialog {
+            return match (dialog, key.code) {
+                (RemovalDialog::Confirming { copies, .. }, KeyCode::Char('y')) => {
+                    let total_copies = *copies;
+                    self.dialog = Some(RemovalDialog::Removing {
+                        handled_copies: 0,
+                        total_copies,
+                    });
+                    KeyHandling::Remove(self.groups.iter().filter_map(GroupView::removal).collect())
+                }
+                (RemovalDialog::Confirming { .. }, KeyCode::Char('n') | KeyCode::Esc)
+                | (RemovalDialog::Summary(_), KeyCode::Enter | KeyCode::Esc) => {
+                    self.dialog = None;
+                    KeyHandling::Consumed
+                }
+                (RemovalDialog::Summary(summary), KeyCode::Up) => {
+                    summary.move_selection(Step::Previous);
+                    KeyHandling::Consumed
+                }
+                (RemovalDialog::Summary(summary), KeyCode::Down) => {
+                    summary.move_selection(Step::Next);
+                    KeyHandling::Consumed
+                }
+                (RemovalDialog::Summary(_), _) => KeyHandling::Ignored,
+                // Waiting on the answer or on the worker: no other key means anything here.
+                (RemovalDialog::Confirming { .. } | RemovalDialog::Removing { .. }, _) => {
+                    KeyHandling::Consumed
+                }
+            };
+        }
+
         match (self.view, key.code) {
             (View::Skipped, KeyCode::Esc | KeyCode::Char('s')) => self.view = View::Duplicates,
             (View::Skipped, KeyCode::Up) => self.skipped.move_selection(Step::Previous),
@@ -157,6 +230,7 @@ impl ResultsScreen {
             (View::Duplicates, KeyCode::Down) => self.move_selection(Step::Next),
             (View::Duplicates, KeyCode::Char(' ')) => self.toggle_highlighted_copy(),
             (View::Duplicates, KeyCode::Char('k')) => self.keep_only_highlighted_copy(),
+            (View::Duplicates, KeyCode::Char('d')) => self.ask_to_remove_marked_copies(),
             (View::Duplicates, KeyCode::Tab | KeyCode::BackTab) => {
                 self.focus = match self.focus {
                     Pane::Groups => Pane::Copies,
@@ -168,6 +242,55 @@ impl ResultsScreen {
         KeyHandling::Consumed
     }
 
+    pub fn on_removal_progress(&mut self, handled: usize) {
+        if let Some(RemovalDialog::Removing { handled_copies, .. }) = &mut self.dialog {
+            *handled_copies = handled;
+        }
+    }
+
+    /// Shows the summary, drops every removed copy and every group left with one copy, and unmarks
+    /// what stayed: those copies were left in place for a reason the summary gives.
+    pub fn on_removal_finished(&mut self, results: &[CopyRemoval]) {
+        let removed: HashSet<&Path> = results
+            .iter()
+            .filter(|result| result.outcome == RemovalOutcome::Removed)
+            .map(|result| result.path.as_path())
+            .collect();
+        self.freed_bytes += results
+            .iter()
+            .filter(|result| removed.contains(result.path.as_path()))
+            .map(|result| result.file_size)
+            .sum::<u64>();
+
+        for group in &mut self.groups {
+            group
+                .copies
+                .retain(|copy| !removed.contains(copy.source.as_path()));
+            for copy in &mut group.copies {
+                copy.marked = false;
+            }
+        }
+        self.groups.retain(|group| group.copies.len() > 1);
+        let selected_group = match self.groups.len() {
+            0 => None,
+            group_count => Some(
+                self.group_selection
+                    .selected()
+                    .unwrap_or(0)
+                    .min(group_count - 1),
+            ),
+        };
+        self.group_selection.select(selected_group);
+        self.copy_selection.select(selected_group.map(|_| 0));
+
+        self.dialog = Some(RemovalDialog::Summary(RemovalSummary::new(
+            results,
+            self.disposal,
+            &self.log_label,
+            &self.home,
+        )));
+    }
+
     pub fn render(&mut self, frame: &mut Frame) {
         let details = if self.groups.is_empty() {
             String::new()
@@ -175,13 +298,14 @@ impl ResultsScreen {
             format!(
                 " · {} · {} reclaimable{}",
                 format_quantity(self.groups.len(), "group", "groups"),
-                format_bytes(self.reclaimable_bytes),
+                format_bytes(self.groups.iter().map(GroupView::reclaimable_bytes).sum()),
                 self.marked_summary()
             )
         };
-        let key_hints = match self.view {
-            View::Skipped => SKIPPED_KEY_HINTS.to_owned(),
-            View::Duplicates => self.duplicates_key_hints(),
+        let key_hints = match (&self.dialog, self.view) {
+            (Some(dialog), _) => removal::key_hints(dialog, self.disposal).to_owned(),
+            (None, View::Skipped) => SKIPPED_KEY_HINTS.to_owned(),
+            (None, View::Duplicates) => self.duplicates_key_hints(),
         };
         let outer = Block::bordered()
             .title(screen_title(&self.root_label, &details, frame.area().width))
@@ -194,13 +318,16 @@ impl ResultsScreen {
             View::Duplicates if self.groups.is_empty() => self.render_empty(frame, inner),
             View::Duplicates => self.render_duplicates(frame, inner),
         }
+        if let Some(dialog) = &mut self.dialog {
+            removal::render(dialog, self.disposal, frame, inner);
+        }
     }
 
     fn duplicates_key_hints(&self) -> String {
         let navigation = if self.groups.is_empty() {
             ""
         } else {
-            "↑↓ move  tab switch pane  space mark  k keep this  "
+            "↑↓ move  tab switch pane  space mark  k keep this  d remove marked  "
         };
         let skipped = if self.skipped.is_empty() {
             String::new()
@@ -227,7 +354,7 @@ impl ResultsScreen {
         let group_rows = self
             .groups
             .iter()
-            .map(|group| truncate_end(&group.row, group_row_width));
+            .map(|group| truncate_end(&group.row(), group_row_width));
         frame.render_stateful_widget(
             pane_list(
                 group_rows,
@@ -245,7 +372,7 @@ impl ResultsScreen {
         let Some(group) = self.selected_group() else {
             return;
         };
-        let title = group.title.clone();
+        let title = group.title();
         let copy_rows: Vec<String> = group
             .copies
             .iter()
@@ -277,27 +404,40 @@ impl ResultsScreen {
             Constraint::Fill(1),
         ])
         .areas(area);
-        let scanned = format_quantity(self.scanned_files, "file", "files");
-        let totals = if self.skipped.is_empty() {
-            format!("{scanned} scanned.")
+        let headline = if self.freed_bytes > 0 {
+            "No duplicates left in"
         } else {
-            format!(
-                "{scanned} scanned, {} skipped.",
-                format_count(self.skipped.len())
-            )
+            "No duplicates found in"
         };
-        let message = Paragraph::new(vec![
-            Line::from(format!("No duplicates found in {}.", self.root_label)),
-            Line::from(totals),
-        ])
-        .centered();
-        frame.render_widget(message, message_area);
+        // The root is cut at its start, like everywhere else, so the sentence keeps its end.
+        let root_width = usize::from(area.width).saturating_sub(format!("{headline} .").width());
+        let headline = format!(
+            "{headline} {}.",
+            truncate_start(&self.root_label, root_width)
+        );
+        let lines = if self.freed_bytes > 0 {
+            vec![
+                Line::from(headline),
+                Line::from(format!("{} freed.", format_bytes(self.freed_bytes))),
+            ]
+        } else {
+            let scanned = format_quantity(self.scanned_files, "file", "files");
+            let totals = if self.skipped.is_empty() {
+                format!("{scanned} scanned.")
+            } else {
+                format!(
+                    "{scanned} scanned, {} skipped.",
+                    format_count(self.skipped.len())
+                )
+            };
+            vec![Line::from(headline), Line::from(totals)]
+        };
+        frame.render_widget(Paragraph::new(lines).centered(), message_area);
     }
 
-    /// ` · marked 3 · 1.2 GiB`, or nothing while no copy is marked.
-    fn marked_summary(&self) -> String {
-        let (marked_copies, marked_bytes) = self
-            .groups
+    /// How many copies are marked, and their total size.
+    fn marked_totals(&self) -> (usize, u64) {
+        self.groups
             .iter()
             .flat_map(|group| {
                 group
@@ -308,15 +448,31 @@ impl ResultsScreen {
             })
             .fold((0, 0), |(copies, bytes), file_size| {
                 (copies + 1, bytes + file_size)
-            });
-        if marked_copies == 0 {
-            return String::new();
+            })
+    }
+
+    /// ` · marked 3 · 1.2 GiB`, or nothing while no copy is marked.
+    fn marked_summary(&self) -> String {
+        match self.marked_totals() {
+            (0, _) => String::new(),
+            (marked_copies, marked_bytes) => format!(
+                " · marked {} · {}",
+                format_count(marked_copies),
+                format_bytes(marked_bytes)
+            ),
         }
-        format!(
-            " · marked {} · {}",
-            format_count(marked_copies),
-            format_bytes(marked_bytes)
-        )
+    }
+
+    fn ask_to_remove_marked_copies(&mut self) {
+        match self.marked_totals() {
+            (0, _) => {
+                self.notice = Some(
+                    "Nothing is marked yet: space marks a copy, k keeps one and marks the rest."
+                        .to_owned(),
+                );
+            }
+            (copies, bytes) => self.dialog = Some(RemovalDialog::Confirming { copies, bytes }),
+        }
     }
 
     /// The selected group and the index of its highlighted copy, whichever pane has the focus.

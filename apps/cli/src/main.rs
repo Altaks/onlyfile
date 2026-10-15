@@ -6,30 +6,39 @@ use clap::Parser;
 use directories::BaseDirs;
 use jiff::tz::TimeZone;
 
+use purge::Disposal;
+
 use crate::{
     app::{App, AppExit},
     format::format_path,
     logging::LogFileError,
     pipeline::PipelineError,
+    settings::RunSettings,
 };
 
 mod app;
 mod format;
 mod logging;
 mod pipeline;
+mod removal;
 mod screens;
+mod settings;
 
 const ERROR_PREFIX: &str = "onlyfile:";
 
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Find duplicate files in a folder.",
+    about = "Find duplicate files in a folder and move the extra copies to the trash.",
     bin_name = "onlyfile"
 )]
 struct Arguments {
     /// Folder to scan. Defaults to the current folder.
     path: Option<PathBuf>,
+
+    /// Delete marked copies permanently instead of moving them to the trash.
+    #[arg(long)]
+    permanent: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +57,11 @@ enum AppError {
     Terminal(#[source] io::Error),
     #[error("the scan stopped: {0}")]
     ScanFailed(#[source] PipelineError),
+    #[error(
+        "the removal stopped without a result; every copy it already removed is listed in {}",
+        .0.display()
+    )]
+    RemovalInterrupted(PathBuf),
 }
 
 fn main() -> ExitCode {
@@ -63,21 +77,29 @@ fn main() -> ExitCode {
 fn run(arguments: Arguments) -> Result<(), AppError> {
     let root = scan_root(arguments.path)?;
     let base_dirs = BaseDirs::new().ok_or(AppError::NoHomeFolder)?;
-    logging::init(base_dirs.data_local_dir())?;
+    let log_path = logging::init(base_dirs.data_local_dir())?;
+    let home = base_dirs.home_dir();
 
-    let root_label = format_path(&root, base_dirs.home_dir());
+    let settings = RunSettings {
+        root_label: format_path(&root, home),
+        time_zone: TimeZone::system(),
+        home: home.to_path_buf(),
+        disposal: if arguments.permanent {
+            Disposal::Permanent
+        } else {
+            Disposal::Trash
+        },
+        log_label: format_path(&log_path, home),
+    };
     let events = pipeline::spawn(root);
-    let app = App::new(
-        root_label,
-        TimeZone::system(),
-        base_dirs.home_dir().to_path_buf(),
-    );
+    let app = App::new(settings);
     let exit = ratatui::try_init().and_then(|mut terminal| app.run(&mut terminal, &events));
     ratatui::restore();
 
     match exit.map_err(AppError::Terminal)? {
         AppExit::Quit => Ok(()),
         AppExit::ScanFailed(error) => Err(AppError::ScanFailed(error)),
+        AppExit::RemovalInterrupted => Err(AppError::RemovalInterrupted(log_path)),
     }
 }
 

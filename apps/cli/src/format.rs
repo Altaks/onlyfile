@@ -7,6 +7,7 @@ use std::{
 
 use jiff::{Timestamp, tz::TimeZone};
 use model::SkipReason;
+use purge::RemovalOutcome;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const BYTES_PER_UNIT: f64 = 1024.0;
@@ -95,6 +96,17 @@ pub fn format_skip_reason(reason: SkipReason) -> String {
         SkipReason::EmptyFile => "empty file".to_owned(),
         SkipReason::Hardlink => "hardlink".to_owned(),
         SkipReason::Unreadable(kind) => format!("unreadable: {kind}"),
+    }
+}
+
+/// What happened to a copy, in a few words.
+pub fn format_removal_outcome(outcome: &RemovalOutcome) -> String {
+    match outcome {
+        RemovalOutcome::Removed => "removed".to_owned(),
+        RemovalOutcome::ChangedSinceScan => "changed since the scan".to_owned(),
+        RemovalOutcome::CopyUnreadable(kind) => format!("unreadable: {kind}"),
+        RemovalOutcome::KeptCopyUnreadable(kind) => format!("kept copy unreadable: {kind}"),
+        RemovalOutcome::RemovalFailed(reason) => reason.clone(),
     }
 }
 
@@ -264,6 +276,31 @@ mod tests {
         assert_eq!(
             format_skip_reason(SkipReason::Unreadable(std::io::ErrorKind::PermissionDenied)),
             "unreadable: permission denied"
+        );
+    }
+
+    #[test]
+    fn removal_outcomes_read_as_plain_words() {
+        use std::io::ErrorKind;
+
+        assert_eq!(format_removal_outcome(&RemovalOutcome::Removed), "removed");
+        assert_eq!(
+            format_removal_outcome(&RemovalOutcome::ChangedSinceScan),
+            "changed since the scan"
+        );
+        assert_eq!(
+            format_removal_outcome(&RemovalOutcome::CopyUnreadable(ErrorKind::NotFound)),
+            "unreadable: entity not found"
+        );
+        assert_eq!(
+            format_removal_outcome(&RemovalOutcome::KeptCopyUnreadable(
+                ErrorKind::PermissionDenied
+            )),
+            "kept copy unreadable: permission denied"
+        );
+        assert_eq!(
+            format_removal_outcome(&RemovalOutcome::RemovalFailed("disk full".to_owned())),
+            "disk full"
         );
     }
 

@@ -984,6 +984,7 @@ dependencies = [
  "directories",
  "jiff",
  "model",
+ "purge",
  "ratatui",
  "replica",
  "scanner",
