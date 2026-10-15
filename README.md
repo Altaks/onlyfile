@@ -32,8 +32,12 @@ onlyfile --permanent ~/Downloads   # delete instead of moving to the trash
    A group always keeps at least one unmarked copy.
 4. **Remove.** `d` asks first, naming how many copies, how much space and where they go. `y` removes
    them; `n` cancels.
-5. **Read the summary.** It lists what was removed, the space freed, every copy left in place or that
-   could not be removed with the reason, and where the log is.
+5. **Read the summary.** It lists what was removed and its size, every copy left in place or that
+   could not be removed with the reason, and where the log is. Copies moved to the trash free their
+   space once the trash is emptied.
+
+`ctrl-c` during a removal stops it after the copy it is handling, so every removal is in the log;
+the copies it did not reach stay marked for the next `d`. A second `ctrl-c` quits at once.
 
 ### Keys
 
@@ -48,7 +52,7 @@ onlyfile --permanent ~/Downloads   # delete instead of moving to the trash
 | `enter` | Close the removal summary |
 | `?` | Show or hide the help |
 | `q`, `esc` | Quit (`esc` closes a list or a dialog first) |
-| `ctrl-c` | Quit at any time |
+| `ctrl-c` | Quit; during a removal, stop after the current copy (twice: quit at once) |
 
 ### What counts as a duplicate
 
@@ -57,8 +61,9 @@ Files are compared in four steps, each one only on the files that passed the one
 1. Same size.
 2. Same first, middle and last KiB.
 3. Same xxh3-128 hash of the whole content.
-4. Right before a removal, the same bytes as the copy the group keeps, read again from disk. A copy
-   that changed since the scan stays where it is.
+4. Right before a removal, the same bytes as the copy the group keeps, read again from disk, and a
+   different file from it. A copy that no longer matches, or that has become the kept file under
+   another name (a folder replaced by a symlink, say), stays where it is.
 
 Left out of the comparison, and listed under `s`:
 
@@ -75,11 +80,21 @@ Left out of the comparison, and listed under `s`:
 | Platform | Trash | `--permanent` |
 |---|---|---|
 | macOS | The Trash, through NSFileManager | Deleted |
-| Linux | The freedesktop trash: `~/.local/share/Trash`, or the drive's own `.Trash-<uid>` for another drive | Deleted |
+| Linux | The freedesktop trash: `~/.local/share/Trash`, or the drive's own `.Trash-<uid>` for another drive (copied to the home trash when that folder cannot be created) | Deleted |
 | Windows | The Recycle Bin | Deleted |
 
 A copy the trash refuses is reported in the summary and stays where it is: onlyfile never deletes it
 instead.
+
+### Known limits
+
+- **Windows, drives without a Recycle Bin** (some network shares and removable drives): Windows may
+  delete a file it cannot keep instead of refusing it, and the trash library has no way to tell.
+  Use `--permanent` knowingly there, or check the Recycle Bin first.
+- **Windows, ReFS and Dev Drive volumes**: files are told apart by a 64-bit index that ReFS does not
+  guarantee unique, so two different files there can be taken for hardlinks of each other. The
+  effect is missed duplicates, never a wrong removal: the same check refuses to remove a copy it
+  takes for the kept file.
 
 ### The log
 
@@ -126,6 +141,7 @@ checks that the workspace still builds with Rust 1.88.
 | `libs/model` | The shared types: scanned files, duplicate groups, skipped entries |
 | `libs/scanner` | Walking a folder into the files worth comparing, and the entries left out |
 | `libs/replica` | Grouping files with identical content, hardlinks counted once |
+| `libs/identity` | Telling whether two paths or open files are one file on disk |
 | `libs/purge` | Checking each marked copy against the kept one, then trashing or deleting it |
 | `apps/cli` | The `onlyfile` binary: arguments, log file, worker threads and screens |
 
