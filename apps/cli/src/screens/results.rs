@@ -31,6 +31,8 @@ const GROUPS_PANE_PERCENT: u16 = 35;
 const GROUP_SIZE_WIDTH: usize = 8;
 const COLUMN_GAP: &str = "  ";
 const GROUPS_PANE_TITLE: &str = " Groups ";
+const MARKED_BOX: &str = "[x] ";
+const UNMARKED_BOX: &str = "[ ] ";
 const SKIPPED_KEY_HINTS: &str = " ↑↓ move  esc back  q quit ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +58,16 @@ pub struct ResultsScreen {
     focus: Pane,
     group_selection: ListState,
     copy_selection: ListState,
+    /// Why the last key did nothing, shown until the next key.
+    notice: Option<String>,
 }
 
 /// What the screen shows of one duplicate group, formatted once when the results arrive.
 #[derive(Debug)]
 struct GroupView {
+    /// `IMG_2041.mov`, the first copy's file name.
+    name: String,
+    file_size: u64,
     /// `412 MiB ×3 IMG_2041.mov`
     row: String,
     /// `IMG_2041.mov · 412 MiB · 3 copies`
@@ -72,6 +79,7 @@ struct GroupView {
 struct CopyView {
     path: String,
     modified_date: String,
+    marked: bool,
 }
 
 impl GroupView {
@@ -81,18 +89,21 @@ impl GroupView {
             || first_path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let file_size = format_bytes(group.file_size());
+        let size_label = format_bytes(group.file_size());
         let copy_count = group.copies().len();
 
         Self {
-            row: format!("{file_size:>GROUP_SIZE_WIDTH$} ×{copy_count} {name}"),
-            title: format!(" {name} · {file_size} · {copy_count} copies "),
+            row: format!("{size_label:>GROUP_SIZE_WIDTH$} ×{copy_count} {name}"),
+            title: format!(" {name} · {size_label} · {copy_count} copies "),
+            name,
+            file_size: group.file_size(),
             copies: group
                 .copies()
                 .iter()
                 .map(|copy| CopyView {
                     path: format_path(&copy.path, home),
                     modified_date: format_date(copy.modified, time_zone),
+                    marked: false,
                 })
                 .collect(),
         }
@@ -129,10 +140,12 @@ impl ResultsScreen {
             focus: Pane::Groups,
             group_selection: ListState::default().with_selected(first_row),
             copy_selection: ListState::default().with_selected(first_row),
+            notice: None,
         }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> KeyHandling {
+        self.notice = None;
         match (self.view, key.code) {
             (View::Skipped, KeyCode::Esc | KeyCode::Char('s')) => self.view = View::Duplicates,
             (View::Skipped, KeyCode::Up) => self.skipped.move_selection(Step::Previous),
@@ -142,6 +155,8 @@ impl ResultsScreen {
             }
             (View::Duplicates, KeyCode::Up) => self.move_selection(Step::Previous),
             (View::Duplicates, KeyCode::Down) => self.move_selection(Step::Next),
+            (View::Duplicates, KeyCode::Char(' ')) => self.toggle_highlighted_copy(),
+            (View::Duplicates, KeyCode::Char('k')) => self.keep_only_highlighted_copy(),
             (View::Duplicates, KeyCode::Tab | KeyCode::BackTab) => {
                 self.focus = match self.focus {
                     Pane::Groups => Pane::Copies,
@@ -158,9 +173,10 @@ impl ResultsScreen {
             String::new()
         } else {
             format!(
-                " · {} · {} reclaimable",
+                " · {} · {} reclaimable{}",
                 format_quantity(self.groups.len(), "group", "groups"),
-                format_bytes(self.reclaimable_bytes)
+                format_bytes(self.reclaimable_bytes),
+                self.marked_summary()
             )
         };
         let key_hints = match self.view {
@@ -184,7 +200,7 @@ impl ResultsScreen {
         let navigation = if self.groups.is_empty() {
             ""
         } else {
-            "↑↓ move  tab switch pane  "
+            "↑↓ move  tab switch pane  space mark  k keep this  "
         };
         let skipped = if self.skipped.is_empty() {
             String::new()
@@ -195,11 +211,16 @@ impl ResultsScreen {
     }
 
     fn render_duplicates(&mut self, frame: &mut Frame, area: Rect) {
+        let [panes_area, notice_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        if let Some(notice) = &self.notice {
+            frame.render_widget(Paragraph::new(notice.as_str()), notice_area);
+        }
         let [groups_area, copies_area] = Layout::horizontal([
             Constraint::Percentage(GROUPS_PANE_PERCENT),
             Constraint::Fill(1),
         ])
-        .areas(area);
+        .areas(panes_area);
 
         let group_row_width = usize::from(groups_area.width.saturating_sub(BORDER_CELLS))
             .saturating_sub(HIGHLIGHT_SYMBOL.width());
@@ -218,7 +239,9 @@ impl ResultsScreen {
         );
 
         let path_width = usize::from(copies_area.width.saturating_sub(BORDER_CELLS))
-            .saturating_sub(HIGHLIGHT_SYMBOL.width() + COLUMN_GAP.width() + DATE_WIDTH);
+            .saturating_sub(
+                HIGHLIGHT_SYMBOL.width() + MARKED_BOX.width() + COLUMN_GAP.width() + DATE_WIDTH,
+            );
         let Some(group) = self.selected_group() else {
             return;
         };
@@ -229,7 +252,15 @@ impl ResultsScreen {
             .map(|copy| {
                 let path = truncate_start(&copy.path, path_width);
                 let padding = " ".repeat(path_width.saturating_sub(path.width()));
-                format!("{path}{padding}{COLUMN_GAP}{}", copy.modified_date)
+                let mark_box = if copy.marked {
+                    MARKED_BOX
+                } else {
+                    UNMARKED_BOX
+                };
+                format!(
+                    "{mark_box}{path}{padding}{COLUMN_GAP}{}",
+                    copy.modified_date
+                )
             })
             .collect();
         frame.render_stateful_widget(
@@ -261,6 +292,64 @@ impl ResultsScreen {
         ])
         .centered();
         frame.render_widget(message, message_area);
+    }
+
+    /// ` · marked 3 · 1.2 GiB`, or nothing while no copy is marked.
+    fn marked_summary(&self) -> String {
+        let (marked_copies, marked_bytes) = self
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .copies
+                    .iter()
+                    .filter(|copy| copy.marked)
+                    .map(|_| group.file_size)
+            })
+            .fold((0, 0), |(copies, bytes), file_size| {
+                (copies + 1, bytes + file_size)
+            });
+        if marked_copies == 0 {
+            return String::new();
+        }
+        format!(
+            " · marked {} · {}",
+            format_count(marked_copies),
+            format_bytes(marked_bytes)
+        )
+    }
+
+    /// The selected group and the index of its highlighted copy, whichever pane has the focus.
+    fn highlighted_copy(&mut self) -> Option<(&mut GroupView, usize)> {
+        let copy_index = self.copy_selection.selected()?;
+        let group = self.groups.get_mut(self.group_selection.selected()?)?;
+        (copy_index < group.copies.len()).then_some((group, copy_index))
+    }
+
+    fn toggle_highlighted_copy(&mut self) {
+        let Some((group, copy_index)) = self.highlighted_copy() else {
+            return;
+        };
+        let unmarked_copies = group.copies.iter().filter(|copy| !copy.marked).count();
+        let copy = &mut group.copies[copy_index];
+
+        if !copy.marked && unmarked_copies == 1 {
+            self.notice = Some(format!(
+                "Every group keeps one copy: unmark another copy of {} first.",
+                group.name
+            ));
+        } else {
+            copy.marked = !copy.marked;
+        }
+    }
+
+    fn keep_only_highlighted_copy(&mut self) {
+        let Some((group, kept_index)) = self.highlighted_copy() else {
+            return;
+        };
+        for (index, copy) in group.copies.iter_mut().enumerate() {
+            copy.marked = index != kept_index;
+        }
     }
 
     fn selected_group(&self) -> Option<&GroupView> {

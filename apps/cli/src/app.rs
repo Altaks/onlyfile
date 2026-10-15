@@ -407,7 +407,7 @@ mod tests {
         row_containing(&rows, "big.mov · 4.0 KiB · 3 copies");
         let second_copy = row_containing(&rows, &shown("dump/big.mov"));
         assert!(
-            second_copy.contains(&format!("> {}", shown("dump/big.mov"))),
+            second_copy.contains(&format!("> [ ] {}", shown("dump/big.mov"))),
             "{second_copy}"
         );
     }
@@ -453,7 +453,10 @@ mod tests {
 
         let rows = rendered_rows(&mut app, 100, 12);
 
-        row_containing(&rows, " ↑↓ move  tab switch pane  s skipped (3)  q quit ");
+        row_containing(
+            &rows,
+            " ↑↓ move  tab switch pane  space mark  k keep this  s skipped (3)  q quit ",
+        );
     }
 
     #[test]
@@ -555,6 +558,156 @@ mod tests {
 
         press(&mut app, KeyCode::Char('s'));
         row_containing(&rendered_rows(&mut app, 80, 12), "Skipped · 3 entries");
+    }
+
+    fn copy_row<'rows>(rows: &'rows [String], relative_path: &str) -> &'rows str {
+        row_containing(rows, &shown(relative_path))
+    }
+
+    #[test]
+    fn copies_start_unmarked_and_the_key_bar_offers_marking() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        for path in ["2023/big.mov", "dump/big.mov", "old/big (1).mov"] {
+            let row = copy_row(&rows, path);
+            assert!(row.contains(&format!("[ ] {}", shown(path))), "{row}");
+        }
+        row_containing(
+            &rows,
+            " ↑↓ move  tab switch pane  space mark  k keep this  q quit ",
+        );
+        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn space_marks_the_highlighted_copy_and_counts_it_in_the_header() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "dump/big.mov").contains("[x]"));
+        assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
+        assert!(rows[0].contains(" · marked 1 · 4.0 KiB "), "{}", rows[0]);
+    }
+
+    #[test]
+    fn space_on_a_marked_copy_unmarks_it() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char(' '));
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
+        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn the_last_unmarked_copy_of_a_group_cannot_be_marked() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "old/big (1).mov").contains("[ ]"));
+        assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+        row_containing(
+            &rows,
+            "Every group keeps one copy: unmark another copy of big.mov first.",
+        );
+    }
+
+    #[test]
+    fn the_refusal_disappears_at_the_next_key() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char(' '));
+
+        press(&mut app, KeyCode::Down);
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(
+            rows.iter().all(|row| !row.contains("Every group keeps")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn k_keeps_the_highlighted_copy_and_marks_every_other() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "2023/big.mov").contains("[x]"));
+        assert!(copy_row(&rows, "dump/big.mov").contains("[ ]"));
+        assert!(copy_row(&rows, "old/big (1).mov").contains("[x]"));
+        assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+    }
+
+    #[test]
+    fn marking_from_the_groups_pane_acts_on_the_highlighted_copy() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "small.txt").contains("[ ]"));
+        assert!(copy_row(&rows, "old/small.txt").contains("[x]"));
+        assert!(rows[0].contains(" · marked 1 · 100 B "), "{}", rows[0]);
+    }
+
+    #[test]
+    fn marks_survive_moving_between_groups() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
+        assert!(copy_row(&rows, "dump/big.mov").contains("[x]"));
+        assert!(rows[0].contains(" · marked 3 · 8.1 KiB "), "{}", rows[0]);
+    }
+
+    #[test]
+    fn marking_keys_do_nothing_in_the_skipped_list() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Esc);
+        let rows = rendered_rows(&mut app, 110, 12);
+
+        assert!(!rows[0].contains("marked"), "{}", rows[0]);
     }
 
     #[test]
