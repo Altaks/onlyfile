@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Finds files with identical content: size, then a sampled hash, then a hash of the whole content."
 
 [dependencies]
 identity = { workspace = true }

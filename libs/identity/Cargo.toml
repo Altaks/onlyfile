@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Tells whether two paths or open files are one file on disk: hardlinks, symlinked folders."
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = { workspace = true }
