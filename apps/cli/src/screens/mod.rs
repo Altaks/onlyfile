@@ -76,6 +76,15 @@ pub fn screen_title(root_label: &str, details: &str, width: u16) -> String {
     format!(" {APP_NAME} {root}{details} ")
 }
 
+/// `done / total` for a gauge: nothing to do counts as done, and overshooting stops at full.
+pub fn done_share(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        (done as f64 / total as f64).min(1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

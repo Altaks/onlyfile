@@ -10,7 +10,7 @@ use replica::ComparisonProgress;
 use crate::{
     format::{format_bytes, format_count, format_quantity},
     pipeline::PipelineProgress,
-    screens::screen_title,
+    screens::{done_share, screen_title},
 };
 
 const KEY_HINTS: &str = " q cancel ";
@@ -90,14 +90,5 @@ fn completion_ratio(progress: &PipelineProgress) -> Option<f64> {
             total_bytes,
             ..
         }) => Some(done_share(hashed_bytes, total_bytes)),
-    }
-}
-
-/// `done / total`, where nothing to do counts as done.
-fn done_share(done: u64, total: u64) -> f64 {
-    if total == 0 {
-        1.0
-    } else {
-        done as f64 / total as f64
     }
 }

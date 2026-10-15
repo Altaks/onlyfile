@@ -136,7 +136,7 @@ impl GroupView {
     }
 
     fn reclaimable_bytes(&self) -> u64 {
-        self.file_size * (self.copies.len() as u64 - 1)
+        model::reclaimable_bytes(self.file_size, self.copies.len())
     }
 
     /// What removing this group's marked copies takes, or `None` when none is marked. The first
@@ -265,11 +265,7 @@ impl ResultsScreen {
             }
             _ => 0,
         };
-        self.removed_bytes += results
-            .iter()
-            .filter(|result| result.outcome == RemovalOutcome::Removed)
-            .map(|result| result.file_size)
-            .sum::<u64>();
+        self.removed_bytes += purge::removed_bytes(results);
         // Removed, proven different, or found to be the kept file under another name: either way
         // no longer a copy of its group. An unreadable copy proves nothing and stays.
         let out_of_their_group: HashSet<&Path> = results

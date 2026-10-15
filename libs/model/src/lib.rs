@@ -31,6 +31,12 @@ pub struct SkippedEntry {
 /// One file below this is not a duplicate of anything.
 const MINIMUM_COPIES: usize = 2;
 
+/// The space freed by keeping one of `copy_count` copies of `file_size` bytes and removing the
+/// others.
+pub fn reclaimable_bytes(file_size: u64, copy_count: usize) -> u64 {
+    file_size * (copy_count.saturating_sub(1) as u64)
+}
+
 /// Files whose whole content is identical. Always holds at least two copies.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct DuplicateGroup {
@@ -54,7 +60,7 @@ impl DuplicateGroup {
 
     /// The space freed by keeping one copy and removing all the others.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.file_size() * (self.copies.len() as u64 - 1)
+        reclaimable_bytes(self.file_size(), self.copies.len())
     }
 }
 

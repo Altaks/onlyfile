@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     format::{format_bytes, format_path, format_quantity, format_removal_outcome, truncate_start},
-    screens::{BORDER_CELLS, HIGHLIGHT_SYMBOL, Step, pane_list, step_selection},
+    screens::{BORDER_CELLS, HIGHLIGHT_SYMBOL, Step, done_share, pane_list, step_selection},
 };
 
 const DIALOG_WIDTH_PERCENT: u16 = 70;
@@ -74,7 +74,7 @@ impl RemovalSummary {
             .iter()
             .filter(|result| result.outcome == RemovalOutcome::Removed)
             .collect();
-        let removed_bytes = format_bytes(removed.iter().map(|result| result.file_size).sum());
+        let removed_bytes = format_bytes(purge::removed_bytes(results));
         let copies = format_quantity(removed.len(), "copy", "copies");
         // The trash keeps what it receives: the space only comes back once it is emptied.
         let headline = match (removed.len(), disposal) {
@@ -204,12 +204,10 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
                 Paragraph::new(format!("{action} · {handled_copies} / {total_copies}")),
                 text_area,
             );
-            let ratio = if *total_copies == 0 {
-                1.0
-            } else {
-                *handled_copies as f64 / *total_copies as f64
-            };
-            frame.render_widget(Gauge::default().ratio(ratio.min(1.0)), gauge_area);
+            frame.render_widget(
+                Gauge::default().ratio(done_share(*handled_copies as u64, *total_copies as u64)),
+                gauge_area,
+            );
         }
         RemovalDialog::Summary(summary) => {
             let dialog_area = centered(

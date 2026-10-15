@@ -108,11 +108,7 @@ fn log_totals(results: &[CopyRemoval]) {
                 RemovalOutcome::Removed | RemovalOutcome::RemovalFailed(_)
             )
         }),
-        freed_bytes = results
-            .iter()
-            .filter(|result| result.outcome == RemovalOutcome::Removed)
-            .map(|result| result.file_size)
-            .sum::<u64>(),
+        removed_bytes = purge::removed_bytes(results),
         "removal finished"
     );
 }

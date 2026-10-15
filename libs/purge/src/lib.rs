@@ -69,6 +69,15 @@ pub struct CopyRemoval {
     pub outcome: RemovalOutcome,
 }
 
+/// The total size of the copies `results` reports as removed.
+pub fn removed_bytes(results: &[CopyRemoval]) -> u64 {
+    results
+        .iter()
+        .filter(|result| result.outcome == RemovalOutcome::Removed)
+        .map(|result| result.file_size)
+        .sum()
+}
+
 /// Handles every copy of every removal in order. `on_copy_handled` receives each result as soon as
 /// it is known, so a caller can show progress and log as it goes, and breaks to stop before the
 /// next copy: the copies not reached are left untouched and missing from the result.
@@ -220,6 +229,25 @@ mod tests {
             .iter()
             .map(|result| (result.path.as_path(), &result.outcome))
             .collect()
+    }
+
+    #[test]
+    fn removed_bytes_count_only_the_copies_removed() {
+        let result = |outcome, file_size| CopyRemoval {
+            path: PathBuf::from("copy"),
+            file_size,
+            outcome,
+        };
+
+        assert_eq!(
+            removed_bytes(&[
+                result(RemovalOutcome::Removed, 100),
+                result(RemovalOutcome::DiffersFromKept, 1_000),
+                result(RemovalOutcome::RemovalFailed("busy".to_owned()), 10_000),
+                result(RemovalOutcome::Removed, 20),
+            ]),
+            120
+        );
     }
 
     #[test]
