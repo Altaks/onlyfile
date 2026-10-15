@@ -46,8 +46,9 @@ impl GroupRemoval {
 pub enum RemovalOutcome {
     /// Moved to the trash, or deleted with [`Disposal::Permanent`].
     Removed,
-    /// Left in place: it no longer matches the kept copy.
-    ChangedSinceScan,
+    /// Left in place: it no longer matches the kept copy. Either file may be the one that changed
+    /// since the scan; only the difference is known.
+    DiffersFromKept,
     /// Left in place: this path now leads to the kept file itself (a hardlink, or a folder
     /// replaced by a symlink), so removing it would remove the copy that has to stay.
     SameFileAsKept,
@@ -80,7 +81,7 @@ pub fn remove_copies(
         for copy in &removal.removed {
             let outcome = match compare(copy, &removal.kept) {
                 Ok(Comparison::Identical) => dispose(copy, disposal, &trash),
-                Ok(Comparison::Different) => RemovalOutcome::ChangedSinceScan,
+                Ok(Comparison::Different) => RemovalOutcome::DiffersFromKept,
                 Ok(Comparison::SameFile) => RemovalOutcome::SameFileAsKept,
                 Err(Unreadable::Copy(kind)) => RemovalOutcome::CopyUnreadable(kind),
                 Err(Unreadable::Kept(kind)) => RemovalOutcome::KeptCopyUnreadable(kind),
@@ -247,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_changed_since_the_scan_stays() -> std::io::Result<()> {
+    fn a_copy_that_no_longer_matches_the_kept_one_stays() -> std::io::Result<()> {
         let folder = TempDir::new()?;
         let kept = write(&folder.path().join("kept"), CONTENT);
         let changed = write(
@@ -269,9 +270,9 @@ mod tests {
         assert_eq!(
             outcomes(&results),
             [
-                (changed.as_path(), &RemovalOutcome::ChangedSinceScan),
-                (shorter.as_path(), &RemovalOutcome::ChangedSinceScan),
-                (longer.as_path(), &RemovalOutcome::ChangedSinceScan),
+                (changed.as_path(), &RemovalOutcome::DiffersFromKept),
+                (shorter.as_path(), &RemovalOutcome::DiffersFromKept),
+                (longer.as_path(), &RemovalOutcome::DiffersFromKept),
             ]
         );
         assert!(changed.exists() && shorter.exists() && longer.exists());
@@ -297,7 +298,7 @@ mod tests {
         assert_eq!(
             outcomes(&results),
             [
-                (changed.as_path(), &RemovalOutcome::ChangedSinceScan),
+                (changed.as_path(), &RemovalOutcome::DiffersFromKept),
                 (identical.as_path(), &RemovalOutcome::Removed),
             ]
         );

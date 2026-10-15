@@ -1000,7 +1000,10 @@ mod tests {
         row_containing(&rows, "Left in place (1):");
         row_containing(
             &rows,
-            &format!("  changed since the scan  {}", real_shown("b/photo.jpg")),
+            &format!(
+                "  no longer identical to the kept copy  {}",
+                real_shown("b/photo.jpg")
+            ),
         );
         assert!(real_path(&home, "b/photo.jpg").exists());
 

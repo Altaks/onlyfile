@@ -103,7 +103,7 @@ pub fn format_skip_reason(reason: SkipReason) -> String {
 pub fn format_removal_outcome(outcome: &RemovalOutcome) -> String {
     match outcome {
         RemovalOutcome::Removed => "removed".to_owned(),
-        RemovalOutcome::ChangedSinceScan => "changed since the scan".to_owned(),
+        RemovalOutcome::DiffersFromKept => "no longer identical to the kept copy".to_owned(),
         RemovalOutcome::SameFileAsKept => "same file as the kept copy".to_owned(),
         RemovalOutcome::CopyUnreadable(kind) => format!("unreadable: {kind}"),
         RemovalOutcome::KeptCopyUnreadable(kind) => format!("kept copy unreadable: {kind}"),
@@ -286,8 +286,8 @@ mod tests {
 
         assert_eq!(format_removal_outcome(&RemovalOutcome::Removed), "removed");
         assert_eq!(
-            format_removal_outcome(&RemovalOutcome::ChangedSinceScan),
-            "changed since the scan"
+            format_removal_outcome(&RemovalOutcome::DiffersFromKept),
+            "no longer identical to the kept copy"
         );
         assert_eq!(
             format_removal_outcome(&RemovalOutcome::SameFileAsKept),
