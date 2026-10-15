@@ -6,10 +6,11 @@ license = "MIT"
 
 [workspace]
 resolver = "3"
-members = ["apps/cli", "libs/model", "libs/replica", "libs/scanner"]
+members = ["apps/cli", "libs/model", "libs/purge", "libs/replica", "libs/scanner"]
 
 [workspace.dependencies]
 model = { path = "libs/model" }
+purge = { path = "libs/purge" }
 replica = { path = "libs/replica" }
 scanner = { path = "libs/scanner" }
 
@@ -44,6 +45,9 @@ tempfile = "3.24.0"
 # blake3 = { version = "1.8.3" } 
 
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+# The platform trash: Finder or NSFileManager, freedesktop, the Recycle Bin
+trash = "5.2.9"
 
 # Windows file identity (volume serial number and file index), to recognise hardlinks
 winapi-util = "0.1.11"
