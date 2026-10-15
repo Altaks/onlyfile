@@ -1,6 +1,10 @@
 //! onlyfile: finds duplicate files in a folder.
 
-use std::{io, path::PathBuf, process::ExitCode};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use clap::Parser;
 use directories::BaseDirs;
@@ -53,6 +57,11 @@ enum AppError {
     NoHomeFolder,
     #[error(transparent)]
     LogFile(#[from] LogFileError),
+    #[error(
+        "its output is not a terminal. onlyfile is interactive: run it directly in a terminal, \
+         without piping or redirecting its output."
+    )]
+    NotATerminal,
     #[error("cannot drive the terminal: {0}")]
     Terminal(#[source] io::Error),
     #[error("the scan stopped: {0}")]
@@ -76,6 +85,11 @@ fn main() -> ExitCode {
 
 fn run(arguments: Arguments) -> Result<(), AppError> {
     let root = scan_root(arguments.path)?;
+    // The interface draws on standard output. Without a terminal there, raw mode fails with a
+    // cryptic system error, so say what is wrong before touching anything.
+    if !io::stdout().is_terminal() {
+        return Err(AppError::NotATerminal);
+    }
     let base_dirs = BaseDirs::new().ok_or(AppError::NoHomeFolder)?;
     let log_path = logging::init(base_dirs.data_local_dir())?;
     let home = base_dirs.home_dir();
