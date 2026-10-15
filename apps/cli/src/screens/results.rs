@@ -248,24 +248,34 @@ impl ResultsScreen {
         }
     }
 
-    /// Shows the summary, drops every removed copy and every group left with one copy, and unmarks
-    /// what stayed: those copies were left in place for a reason the summary gives.
+    /// Shows the summary, drops every copy that is no longer part of its group and every group left
+    /// with one copy, and unmarks what stayed: those copies were left in place for a reason the
+    /// summary gives.
     pub fn on_removal_finished(&mut self, results: &[CopyRemoval]) {
-        let removed: HashSet<&Path> = results
-            .iter()
-            .filter(|result| result.outcome == RemovalOutcome::Removed)
-            .map(|result| result.path.as_path())
-            .collect();
         self.removed_bytes += results
             .iter()
-            .filter(|result| removed.contains(result.path.as_path()))
+            .filter(|result| result.outcome == RemovalOutcome::Removed)
             .map(|result| result.file_size)
             .sum::<u64>();
+        // Removed, proven different, or found to be the kept file under another name: either way
+        // no longer a copy of its group. An unreadable copy proves nothing and stays.
+        let out_of_their_group: HashSet<&Path> = results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result.outcome,
+                    RemovalOutcome::Removed
+                        | RemovalOutcome::DiffersFromKept
+                        | RemovalOutcome::SameFileAsKept
+                )
+            })
+            .map(|result| result.path.as_path())
+            .collect();
 
         for group in &mut self.groups {
             group
                 .copies
-                .retain(|copy| !removed.contains(copy.source.as_path()));
+                .retain(|copy| !out_of_their_group.contains(copy.source.as_path()));
             for copy in &mut group.copies {
                 copy.marked = false;
             }

@@ -982,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_changed_after_marking_is_left_in_place_and_unmarked()
+    fn a_copy_no_longer_identical_is_left_in_place_and_leaves_its_group()
     -> Result<(), Box<dyn std::error::Error>> {
         let (home, mut app) = real_duplicates();
         press(&mut app, KeyCode::Char('k'));
@@ -1007,11 +1007,43 @@ mod tests {
         );
         assert!(real_path(&home, "b/photo.jpg").exists());
 
+        // No longer a duplicate of the kept copy, it leaves the group, which is down to one copy.
         press(&mut app, KeyCode::Enter);
         let rows = rendered_rows(&mut app, 110, 14);
-        row_containing(&rows, "photo.jpg · 28 B · 2 copies");
-        let left_in_place = row_containing(&rows, &real_shown("b/photo.jpg"));
-        assert!(left_in_place.contains("[ ]"), "{left_in_place}");
+        assert!(
+            rows[0].contains("· 1 group · 5 B reclaimable "),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("photo.jpg")),
+            "{}",
+            rows.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn without_a_readable_kept_copy_every_copy_stays_listed_and_unmarked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+        press(&mut app, KeyCode::Char('k'));
+        std::fs::remove_file(real_path(&home, "a/photo.jpg"))?;
+
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        let rows = rendered_rows(&mut app, 110, 16);
+        row_containing(&rows, "No copy was removed.");
+        row_containing(&rows, "Left in place (2):");
+
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+        row_containing(&rows, "photo.jpg · 28 B · 3 copies");
+        for path in ["b/photo.jpg", "c/photo.jpg"] {
+            let row = row_containing(&rows, &real_shown(path));
+            assert!(row.contains("[ ]"), "{row}");
+        }
         Ok(())
     }
 
