@@ -1242,7 +1242,6 @@ dependencies = [
  "itertools",
  "model",
  "tempfile",
- "thiserror 2.0.18",
  "winapi-util",
  "xxhash-rust",
 ]

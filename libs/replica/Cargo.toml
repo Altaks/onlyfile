@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 model = { workspace = true }
 xxhash-rust = { workspace = true }
-thiserror = { workspace = true }
 itertools = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
