@@ -2,7 +2,10 @@
 
 use std::{
     io,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Arc,
+        mpsc::{Receiver, TryRecvError},
+    },
     time::Duration,
 };
 
@@ -13,7 +16,7 @@ use ratatui::{
 
 use crate::{
     pipeline::{PipelineError, PipelineEvent, PipelineProgress},
-    removal::{self, RemovalEvent},
+    removal::{self, RemovalEvent, RunningRemoval},
     screens::{KeyHandling, results::ResultsScreen, scanning},
     settings::RunSettings,
 };
@@ -40,7 +43,7 @@ enum Screen {
 pub struct App {
     settings: RunSettings,
     screen: Screen,
-    removal_events: Option<Receiver<RemovalEvent>>,
+    removal: Option<RunningRemoval>,
     exit: Option<AppExit>,
 }
 
@@ -49,7 +52,7 @@ impl App {
         Self {
             settings,
             screen: Screen::Scanning(PipelineProgress::Walking { files_found: 0 }),
-            removal_events: None,
+            removal: None,
             exit: None,
         }
     }
@@ -69,7 +72,7 @@ impl App {
             // Only a worker changes the screen on its own. Without one, nothing changes until a
             // key, so waiting for one keeps an idle results screen from redrawing 20 times a second.
             let worker_running =
-                matches!(self.screen, Screen::Scanning(_)) || self.removal_events.is_some();
+                matches!(self.screen, Screen::Scanning(_)) || self.removal.is_some();
             if !worker_running || event::poll(FRAME_INTERVAL)? {
                 self.on_terminal_event(event::read()?);
             }
@@ -118,14 +121,14 @@ impl App {
     }
 
     fn drain_removal_events(&mut self) {
-        let Some(events) = self.removal_events.take() else {
+        let Some(removal) = self.removal.take() else {
             return;
         };
         let Screen::Results(results) = &mut self.screen else {
             return;
         };
         loop {
-            match events.try_recv() {
+            match removal.events.try_recv() {
                 Ok(RemovalEvent::Progress { handled_copies }) => {
                     results.on_removal_progress(handled_copies);
                 }
@@ -141,7 +144,7 @@ impl App {
                 }
             }
         }
-        self.removal_events = Some(events);
+        self.removal = Some(removal);
     }
 
     fn on_terminal_event(&mut self, event: Event) {
@@ -152,10 +155,16 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        // Ctrl-C always quits, even in the middle of a removal: each copy is checked and removed
-        // as one step, so stopping between two copies leaves nothing half done.
+        // During a removal, a first Ctrl-C lets the worker finish and log the copy it is on, then
+        // shows what was done. Quitting at once could leave a copy removed but not in the log, so
+        // only a second Ctrl-C does that. Anywhere else, Ctrl-C quits.
         if is_interrupt(key) {
-            self.exit = Some(AppExit::Quit);
+            match (&self.removal, &mut self.screen) {
+                (Some(removal), Screen::Results(results)) if removal.request_stop() => {
+                    results.on_removal_stopping();
+                }
+                _ => self.exit = Some(AppExit::Quit),
+            }
             return;
         }
 
@@ -168,7 +177,11 @@ impl App {
                 self.exit = Some(AppExit::Quit);
             }
             KeyHandling::Remove(removals) => {
-                self.removal_events = Some(removal::spawn(removals, self.settings.disposal));
+                self.removal = Some(removal::spawn(
+                    removals,
+                    self.settings.disposal,
+                    Arc::default(),
+                ));
             }
             KeyHandling::Ignored | KeyHandling::Consumed => {}
         }
@@ -824,7 +837,7 @@ mod tests {
     /// Polls until the removal worker has delivered its result.
     fn wait_for_removal(app: &mut App) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while app.removal_events.is_some() {
+        while app.removal.is_some() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the removal never finished"
@@ -905,7 +918,7 @@ mod tests {
             let rows = rendered_rows(&mut app, 110, 14);
 
             assert!(app.exit.is_none(), "{cancel:?}");
-            assert!(app.removal_events.is_none(), "{cancel:?}");
+            assert!(app.removal.is_none(), "{cancel:?}");
             assert!(
                 rows.iter().all(|row| !row.contains("Remove marked copies")),
                 "{cancel:?}"
@@ -1137,21 +1150,52 @@ mod tests {
     }
 
     #[test]
-    fn keys_wait_while_copies_are_being_removed_but_ctrl_c_quits() {
+    fn keys_wait_during_a_removal_and_ctrl_c_stops_it_then_quits() {
         let (_home, mut app) = real_duplicates();
+        let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('d'));
         press(&mut app, KeyCode::Char('y'));
         press(&mut app, KeyCode::Char('q'));
         assert!(app.exit.is_none());
-        row_containing(&rendered_rows(&mut app, 110, 14), " ctrl-c quit ");
+        row_containing(
+            &rendered_rows(&mut app, 110, 14),
+            " ctrl-c stop after this copy ",
+        );
 
-        app.on_terminal_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        )));
+        app.on_terminal_event(ctrl_c());
+        assert!(
+            app.exit.is_none(),
+            "the first ctrl-c only asks the worker to stop"
+        );
+        let rows = rendered_rows(&mut app, 110, 14);
+        row_containing(&rows, "Stopping after the current copy");
+        row_containing(&rows, " ctrl-c quit now ");
+
+        app.on_terminal_event(ctrl_c());
         assert!(matches!(app.exit, Some(AppExit::Quit)));
+    }
+
+    #[test]
+    fn a_stopped_removal_says_what_it_did_not_reach_and_keeps_it_marked() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+
+        // Stopped after the first of the two marked copies.
+        finish_removal(&mut app, &[("dump/big.mov", 4096)]);
+        let rows = rendered_rows(&mut app, 110, 16);
+        row_containing(&rows, "Moved 1 copy (4.0 KiB) to the trash;");
+        row_containing(&rows, "Stopped early: 1 copy not handled, still marked.");
+
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+        let not_reached = row_containing(&rows, &shown("old/big (1).mov"));
+        assert!(not_reached.contains("[x]"), "{not_reached}");
+        assert!(rows[0].contains(" · marked 1 · 4.0 KiB "), "{}", rows[0]);
     }
 
     #[test]
@@ -1160,7 +1204,10 @@ mod tests {
         app.on_pipeline_event(two_groups());
         let (sender, receiver) = mpsc::sync_channel::<RemovalEvent>(1);
         drop(sender);
-        app.removal_events = Some(receiver);
+        app.removal = Some(RunningRemoval {
+            events: receiver,
+            stop: Default::default(),
+        });
 
         app.drain_removal_events();
 

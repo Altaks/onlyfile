@@ -195,6 +195,7 @@ impl ResultsScreen {
                     self.dialog = Some(RemovalDialog::Removing {
                         handled_copies: 0,
                         total_copies,
+                        stopping: false,
                     });
                     KeyHandling::Remove(self.groups.iter().filter_map(GroupView::removal).collect())
                 }
@@ -249,9 +250,21 @@ impl ResultsScreen {
     }
 
     /// Shows the summary, drops every copy that is no longer part of its group and every group left
-    /// with one copy, and unmarks what stayed: those copies were left in place for a reason the
-    /// summary gives.
+    /// with one copy, and unmarks the handled copies that stayed: they were left in place for a
+    /// reason the summary gives.
+    pub fn on_removal_stopping(&mut self) {
+        if let Some(RemovalDialog::Removing { stopping, .. }) = &mut self.dialog {
+            *stopping = true;
+        }
+    }
+
     pub fn on_removal_finished(&mut self, results: &[CopyRemoval]) {
+        let not_reached = match &self.dialog {
+            Some(RemovalDialog::Removing { total_copies, .. }) => {
+                total_copies.saturating_sub(results.len())
+            }
+            _ => 0,
+        };
         self.removed_bytes += results
             .iter()
             .filter(|result| result.outcome == RemovalOutcome::Removed)
@@ -272,12 +285,16 @@ impl ResultsScreen {
             .map(|result| result.path.as_path())
             .collect();
 
+        // A copy the removal never reached stays marked, so `d` picks up where it stopped.
+        let handled: HashSet<&Path> = results.iter().map(|result| result.path.as_path()).collect();
         for group in &mut self.groups {
             group
                 .copies
                 .retain(|copy| !out_of_their_group.contains(copy.source.as_path()));
             for copy in &mut group.copies {
-                copy.marked = false;
+                if handled.contains(copy.source.as_path()) {
+                    copy.marked = false;
+                }
             }
         }
         self.groups.retain(|group| group.copies.len() > 1);
@@ -295,6 +312,7 @@ impl ResultsScreen {
 
         self.dialog = Some(RemovalDialog::Summary(RemovalSummary::new(
             results,
+            not_reached,
             self.disposal,
             &self.log_label,
             &self.home,

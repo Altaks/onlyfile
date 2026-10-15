@@ -4,6 +4,7 @@
 use std::{
     fs::File,
     io::{self, ErrorKind, Read},
+    ops::ControlFlow,
     path::{Path, PathBuf},
 };
 
@@ -69,11 +70,12 @@ pub struct CopyRemoval {
 }
 
 /// Handles every copy of every removal in order. `on_copy_handled` receives each result as soon as
-/// it is known, so a caller can show progress and log as it goes.
+/// it is known, so a caller can show progress and log as it goes, and breaks to stop before the
+/// next copy: the copies not reached are left untouched and missing from the result.
 pub fn remove_copies(
     removals: &[GroupRemoval],
     disposal: Disposal,
-    mut on_copy_handled: impl FnMut(&CopyRemoval),
+    mut on_copy_handled: impl FnMut(&CopyRemoval) -> ControlFlow<()>,
 ) -> Vec<CopyRemoval> {
     let trash = trash_context();
     let mut results = Vec::new();
@@ -91,8 +93,11 @@ pub fn remove_copies(
                 file_size: removal.file_size,
                 outcome,
             };
-            on_copy_handled(&result);
+            let next = on_copy_handled(&result);
             results.push(result);
+            if next.is_break() {
+                return results;
+            }
         }
     }
     results
@@ -236,7 +241,9 @@ mod tests {
         let kept = write(&folder.path().join("kept"), CONTENT);
         let copy = write(&folder.path().join("copy"), CONTENT);
 
-        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Permanent, |_| {});
+        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Permanent, |_| {
+            ControlFlow::Continue(())
+        });
 
         assert_eq!(
             outcomes(&results),
@@ -264,7 +271,7 @@ mod tests {
         let results = remove_copies(
             &[removal(&kept, &[&changed, &shorter, &longer])],
             Disposal::Permanent,
-            |_| {},
+            |_| ControlFlow::Continue(()),
         );
 
         assert_eq!(
@@ -292,7 +299,7 @@ mod tests {
         let results = remove_copies(
             &[removal(&kept, &[&changed, &identical])],
             Disposal::Permanent,
-            |_| {},
+            |_| ControlFlow::Continue(()),
         );
 
         assert_eq!(
@@ -315,7 +322,7 @@ mod tests {
         let results = remove_copies(
             &[removal(&kept, &[&second_name])],
             Disposal::Permanent,
-            |_| {},
+            |_| ControlFlow::Continue(()),
         );
 
         assert_eq!(
@@ -338,7 +345,9 @@ mod tests {
         std::os::unix::fs::symlink(&kept_folder, folder.path().join("b"))?;
         let alias = folder.path().join("b").join("photo.jpg");
 
-        let results = remove_copies(&[removal(&kept, &[&alias])], Disposal::Permanent, |_| {});
+        let results = remove_copies(&[removal(&kept, &[&alias])], Disposal::Permanent, |_| {
+            ControlFlow::Continue(())
+        });
 
         assert_eq!(
             outcomes(&results),
@@ -354,7 +363,9 @@ mod tests {
         let kept = write(&folder.path().join("kept"), CONTENT);
         let missing = folder.path().join("missing");
 
-        let results = remove_copies(&[removal(&kept, &[&missing])], Disposal::Permanent, |_| {});
+        let results = remove_copies(&[removal(&kept, &[&missing])], Disposal::Permanent, |_| {
+            ControlFlow::Continue(())
+        });
 
         assert_eq!(
             outcomes(&results),
@@ -376,7 +387,7 @@ mod tests {
         let results = remove_copies(
             &[removal(&missing_kept, &[&first, &second])],
             Disposal::Permanent,
-            |_| {},
+            |_| ControlFlow::Continue(()),
         );
 
         let not_found = RemovalOutcome::KeptCopyUnreadable(ErrorKind::NotFound);
@@ -399,14 +410,24 @@ mod tests {
         let other_kept = write(&folder.path().join("other_kept"), b"another group");
         let second = write(&folder.path().join("second"), b"another group");
 
+        // What is on disk at the moment each result is reported.
         let mut reported = Vec::new();
         let results = remove_copies(
             &[removal(&kept, &[&first]), removal(&other_kept, &[&second])],
             Disposal::Permanent,
-            |result| reported.push(result.clone()),
+            |result| {
+                reported.push((result.clone(), first.exists(), second.exists()));
+                ControlFlow::Continue(())
+            },
         );
 
-        assert_eq!(reported, results);
+        assert_eq!(
+            reported,
+            [
+                (results[0].clone(), false, true),
+                (results[1].clone(), false, false),
+            ]
+        );
         assert!(
             results
                 .iter()
@@ -419,6 +440,27 @@ mod tests {
                 (second.as_path(), &RemovalOutcome::Removed),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn breaking_from_the_callback_stops_before_the_next_copy() -> std::io::Result<()> {
+        let folder = TempDir::new()?;
+        let kept = write(&folder.path().join("kept"), CONTENT);
+        let first = write(&folder.path().join("first"), CONTENT);
+        let second = write(&folder.path().join("second"), CONTENT);
+
+        let results = remove_copies(
+            &[removal(&kept, &[&first, &second])],
+            Disposal::Permanent,
+            |_| ControlFlow::Break(()),
+        );
+
+        assert_eq!(
+            outcomes(&results),
+            [(first.as_path(), &RemovalOutcome::Removed)]
+        );
+        assert!(second.exists());
         Ok(())
     }
 
@@ -438,7 +480,9 @@ mod tests {
         let copy = write(&locked.join("copy"), CONTENT);
         std::fs::set_permissions(&locked, Permissions::from_mode(READ_AND_ENTER_ONLY))?;
 
-        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Permanent, |_| {});
+        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Permanent, |_| {
+            ControlFlow::Continue(())
+        });
         std::fs::set_permissions(&locked, Permissions::from_mode(OWNER_FULL_ACCESS))?;
 
         let [
@@ -473,7 +517,9 @@ mod tests {
         let name = unique_name();
         let copy = write(&folder.path().join(&name), CONTENT);
 
-        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Trash, |_| {});
+        let results = remove_copies(&[removal(&kept, &[&copy])], Disposal::Trash, |_| {
+            ControlFlow::Continue(())
+        });
 
         assert_eq!(
             outcomes(&results),

@@ -33,6 +33,8 @@ pub enum RemovalDialog {
     Removing {
         handled_copies: usize,
         total_copies: usize,
+        /// Asked to stop once the copy it is on is handled.
+        stopping: bool,
     },
     Summary(RemovalSummary),
 }
@@ -60,7 +62,14 @@ impl SummaryRow {
 }
 
 impl RemovalSummary {
-    pub fn new(results: &[CopyRemoval], disposal: Disposal, log_label: &str, home: &Path) -> Self {
+    /// `not_reached` counts the marked copies a stopped removal never got to.
+    pub fn new(
+        results: &[CopyRemoval],
+        not_reached: usize,
+        disposal: Disposal,
+        log_label: &str,
+        home: &Path,
+    ) -> Self {
         let removed: Vec<&CopyRemoval> = results
             .iter()
             .filter(|result| result.outcome == RemovalOutcome::Removed)
@@ -79,6 +88,12 @@ impl RemovalSummary {
         };
 
         let mut rows = vec![SummaryRow::text(headline)];
+        if not_reached > 0 {
+            rows.push(SummaryRow::text(format!(
+                "Stopped early: {} not handled, still marked.",
+                format_quantity(not_reached, "copy", "copies")
+            )));
+        }
         let failed =
             |result: &&CopyRemoval| matches!(result.outcome, RemovalOutcome::RemovalFailed(_));
         let left_in_place: Vec<&CopyRemoval> = results
@@ -120,7 +135,13 @@ pub fn key_hints(dialog: &RemovalDialog, disposal: Disposal) -> &'static str {
     match (dialog, disposal) {
         (RemovalDialog::Confirming { .. }, Disposal::Trash) => " y move to the trash  n cancel ",
         (RemovalDialog::Confirming { .. }, Disposal::Permanent) => " y delete  n cancel ",
-        (RemovalDialog::Removing { .. }, _) => " ctrl-c quit ",
+        (
+            RemovalDialog::Removing {
+                stopping: false, ..
+            },
+            _,
+        ) => " ctrl-c stop after this copy ",
+        (RemovalDialog::Removing { stopping: true, .. }, _) => " ctrl-c quit now ",
         (RemovalDialog::Summary(_), _) => " ↑↓ scroll  enter continue  q quit ",
     }
 }
@@ -160,10 +181,12 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
         RemovalDialog::Removing {
             handled_copies,
             total_copies,
+            stopping,
         } => {
-            let action = match disposal {
-                Disposal::Trash => "Moving copies to the trash",
-                Disposal::Permanent => "Deleting copies",
+            let action = match (*stopping, disposal) {
+                (true, _) => "Stopping after the current copy",
+                (false, Disposal::Trash) => "Moving copies to the trash",
+                (false, Disposal::Permanent) => "Deleting copies",
             };
             let dialog_area = centered(
                 area,
