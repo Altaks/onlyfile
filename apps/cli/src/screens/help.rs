@@ -22,7 +22,7 @@ const KEYS: [(&str, &str); 10] = [
     ("enter", "close the removal summary"),
     ("?", "show or hide this help"),
     ("q, esc", "quit"),
-    ("ctrl-c", "quit at any time"),
+    ("ctrl-c", "quit, or stop a running removal"),
 ];
 
 pub fn render(disposal: Disposal, frame: &mut Frame, area: Rect) {
@@ -39,7 +39,8 @@ pub fn render(disposal: Disposal, frame: &mut Frame, area: Rect) {
     lines.extend([
         String::new(),
         "Every group keeps at least one copy.".to_owned(),
-        "Before a removal, each marked copy is compared byte for byte with the copy its group keeps; a copy that changed since the scan stays where it is.".to_owned(),
+        "During a removal, ctrl-c stops after the current copy; twice, it quits.".to_owned(),
+        "Before a removal, each marked copy is compared byte for byte with the copy its group keeps; one that no longer matches, or that is the kept file under another name, stays where it is.".to_owned(),
         disposal_rule.to_owned(),
     ]);
 

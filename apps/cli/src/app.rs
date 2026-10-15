@@ -1278,8 +1278,9 @@ mod tests {
             "enter    close the removal summary",
             "?        show or hide this help",
             "q, esc   quit",
-            "ctrl-c   quit at any time",
+            "ctrl-c   quit, or stop a running removal",
             "Every group keeps at least one copy.",
+            "During a removal, ctrl-c stops after the current copy; twice, it quits.",
             "Removed copies go to the trash, where they can be restored.",
         ] {
             row_containing(&rows, line);
@@ -1297,6 +1298,23 @@ mod tests {
             &rendered_rows(&mut app, 120, 30),
             "This run was started with --permanent: removed copies are deleted for good.",
         );
+    }
+
+    #[test]
+    fn the_help_is_tall_enough_for_its_wrapped_text_at_any_width() {
+        for width in 60..=140 {
+            let (_home, mut app) = real_duplicates();
+            press(&mut app, KeyCode::Char('?'));
+
+            let rows = rendered_rows(&mut app, width, 40);
+
+            // The last word of the last line, whichever row the wrapping puts it on.
+            assert!(
+                rows.iter().any(|row| row.contains("good.")),
+                "width {width}:\n{}",
+                rows.join("\n")
+            );
+        }
     }
 
     #[test]
