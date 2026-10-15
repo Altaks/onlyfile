@@ -31,7 +31,8 @@ thiserror = { version = "2.0.17" }
 anyhow = { version = "1.0.100" }
 
 # User interfaces
-ratatui = { version = "0.30.0" }
+# The rendered-line count sizes a dialog with the same word wrapping that draws its text.
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
 unicode-width = "0.2.2"
 
 # Command line arguments

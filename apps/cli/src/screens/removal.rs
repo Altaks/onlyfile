@@ -165,16 +165,17 @@ pub fn render(dialog: &mut RemovalDialog, disposal: Disposal, frame: &mut Frame,
                     .to_owned(),
             ];
             let width = dialog_width(area);
-            let text_width = usize::from(width.saturating_sub(BORDER_CELLS)).max(1);
-            let text_rows: usize = lines
-                .iter()
-                .map(|line| line.width().max(1).div_ceil(text_width))
-                .sum();
-            let height = BORDER_CELLS.saturating_add(u16::try_from(text_rows).unwrap_or(u16::MAX));
-            let dialog_area = centered(area, Constraint::Length(width), Constraint::Length(height));
             let text = Paragraph::new(lines.map(Line::from).to_vec())
                 .wrap(Wrap { trim: true })
                 .block(Block::bordered().title(" Remove marked copies "));
+            // Measured by the paragraph's own word wrapping, borders included, so the box is
+            // exactly as tall as the text it will draw.
+            let height = text.line_count(width.saturating_sub(BORDER_CELLS));
+            let dialog_area = centered(
+                area,
+                Constraint::Length(width),
+                Constraint::Length(u16::try_from(height).unwrap_or(u16::MAX)),
+            );
             frame.render_widget(Clear, dialog_area);
             frame.render_widget(text, dialog_area);
         }

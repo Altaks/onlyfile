@@ -892,6 +892,29 @@ mod tests {
     }
 
     #[test]
+    fn the_confirmation_is_tall_enough_for_its_wrapped_text_at_any_width() {
+        for width in 35..=110 {
+            let (_home, mut app) = real_duplicates();
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char('d'));
+
+            let rows = rendered_rows(&mut app, width, 30);
+
+            let text = rows.join(" ");
+            assert!(
+                text.contains("undone."),
+                "width {width}:\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                text.contains("keeps."),
+                "width {width}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
     fn with_permanent_d_asks_before_deleting_and_says_it_cannot_be_undone() {
         let (_home, mut app) = real_duplicates();
 
