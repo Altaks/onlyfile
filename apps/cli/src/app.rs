@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::{
     pipeline::{PipelineError, PipelineEvent, PipelineProgress},
-    screens::{results::ResultsScreen, scanning},
+    screens::{KeyHandling, results::ResultsScreen, scanning},
 };
 
 /// While the scan runs, how long the interface waits for a key before redrawing with the worker's
@@ -126,10 +126,12 @@ impl App {
             return;
         }
 
-        if is_quit_key(key) {
+        let handling = match &mut self.screen {
+            Screen::Results(results) => results.on_key(key),
+            Screen::Scanning(_) => KeyHandling::Ignored,
+        };
+        if handling == KeyHandling::Ignored && is_quit_key(key) {
             self.exit = Some(AppExit::Quit);
-        } else if let Screen::Results(results) = &mut self.screen {
-            results.on_key(key);
         }
     }
 }
@@ -147,7 +149,7 @@ mod tests {
         time::SystemTime,
     };
 
-    use model::{DuplicateGroup, ScannerFileEntry};
+    use model::{DuplicateGroup, ScannerFileEntry, SkipReason, SkippedEntry};
     use ratatui::{Terminal, backend::TestBackend};
     use replica::ComparisonProgress;
 
@@ -189,13 +191,49 @@ mod tests {
     }
 
     fn finished(scanned_files: usize, groups: Vec<Vec<ScannerFileEntry>>) -> PipelineEvent {
+        finished_with_skips(scanned_files, groups, Vec::new())
+    }
+
+    fn finished_with_skips(
+        scanned_files: usize,
+        groups: Vec<Vec<ScannerFileEntry>>,
+        skipped: Vec<SkippedEntry>,
+    ) -> PipelineEvent {
         PipelineEvent::Finished(Ok(ScanOutcome {
             scanned_files,
             groups: groups
                 .into_iter()
                 .map(|copies| DuplicateGroup::new(copies).expect("at least two copies"))
                 .collect(),
+            skipped,
         }))
+    }
+
+    fn skipped(relative_path: &str, reason: SkipReason) -> SkippedEntry {
+        SkippedEntry {
+            path: photo_path(relative_path),
+            reason,
+        }
+    }
+
+    /// Listed out of path order, so the screen proves the sorting.
+    fn three_skips() -> Vec<SkippedEntry> {
+        vec![
+            skipped(
+                "locked",
+                SkipReason::Unreadable(io::ErrorKind::PermissionDenied),
+            ),
+            skipped("empty.txt", SkipReason::EmptyFile),
+            skipped("link", SkipReason::Symlink),
+        ]
+    }
+
+    fn two_groups_and_three_skips() -> PipelineEvent {
+        let PipelineEvent::Finished(Ok(mut outcome)) = two_groups() else {
+            unreachable!("two_groups always succeeds");
+        };
+        outcome.skipped = three_skips();
+        PipelineEvent::Finished(Ok(outcome))
     }
 
     /// A small group listed after a larger one, so the order on screen proves the sorting.
@@ -406,6 +444,117 @@ mod tests {
         row_containing(&rows, "No duplicates found in ~/Photos.");
         row_containing(&rows, "3 files scanned.");
         row_containing(&rows, "q quit");
+    }
+
+    #[test]
+    fn the_key_bar_offers_the_skipped_list_with_its_count() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        let rows = rendered_rows(&mut app, 100, 12);
+
+        row_containing(&rows, " ↑↓ move  tab switch pane  s skipped (3)  q quit ");
+    }
+
+    #[test]
+    fn without_skipped_entries_the_key_bar_does_not_mention_them() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        let rows = rendered_rows(&mut app, 100, 12);
+
+        assert!(
+            rows.iter().all(|row| !row.contains("skipped")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn s_lists_skipped_entries_by_path_with_their_reason() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        press(&mut app, KeyCode::Char('s'));
+        let rows = rendered_rows(&mut app, 100, 12);
+
+        row_containing(&rows, "Skipped · 3 entries");
+        let listed: Vec<&String> = rows.iter().filter(|row| row.contains(&shown(""))).collect();
+        assert_eq!(listed.len(), 3, "{}", rows.join("\n"));
+        assert!(
+            listed[0].contains(&format!(
+                "> empty file                     {}",
+                shown("empty.txt")
+            )),
+            "{}",
+            listed[0]
+        );
+        assert!(
+            listed[1].contains(&format!(
+                "  symlink                        {}",
+                shown("link")
+            )),
+            "{}",
+            listed[1]
+        );
+        assert!(
+            listed[2].contains(&format!(
+                "  unreadable: permission denied  {}",
+                shown("locked")
+            )),
+            "{}",
+            listed[2]
+        );
+        row_containing(&rows, " ↑↓ move  esc back  q quit ");
+    }
+
+    #[test]
+    fn esc_leaves_the_skipped_list_instead_of_quitting() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Esc);
+        let rows = rendered_rows(&mut app, 100, 12);
+
+        assert!(app.exit.is_none());
+        row_containing(&rows, "Groups");
+    }
+
+    #[test]
+    fn q_quits_from_the_skipped_list() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('q'));
+
+        assert!(matches!(app.exit, Some(AppExit::Quit)));
+    }
+
+    #[test]
+    fn s_does_nothing_when_nothing_was_skipped() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('s'));
+        let rows = rendered_rows(&mut app, 100, 12);
+
+        row_containing(&rows, "Groups");
+        assert!(app.exit.is_none());
+    }
+
+    #[test]
+    fn no_duplicates_still_counts_and_lists_skipped_entries() {
+        let mut app = app();
+        app.on_pipeline_event(finished_with_skips(3, Vec::new(), three_skips()));
+
+        let rows = rendered_rows(&mut app, 80, 12);
+        row_containing(&rows, "3 files scanned, 3 skipped.");
+        row_containing(&rows, " s skipped (3)  q quit ");
+
+        press(&mut app, KeyCode::Char('s'));
+        row_containing(&rendered_rows(&mut app, 80, 12), "Skipped · 3 entries");
     }
 
     #[test]

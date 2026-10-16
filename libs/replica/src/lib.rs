@@ -273,21 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_files_are_duplicates_of_each_other() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = TempDir::new()?;
-        let files = write_files(
-            temp_dir.path(),
-            &[("empty1", b""), ("empty2", b""), ("nonempty", b"content")],
-        )?;
-
-        assert_eq!(
-            grouped_paths(&detect_duplicates(&files, |_| {})?),
-            [paths_under(temp_dir.path(), &["empty1", "empty2"])]
-        );
-        Ok(())
-    }
-
-    #[test]
     fn binary_content_is_compared_byte_for_byte() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let binary_content: &[u8] = &[0x00, 0x01, 0x02, 0xFF, 0xFE];
