@@ -3,42 +3,98 @@ use std::collections::HashMap;
 use itertools::Itertools;
 use model::{DuplicateGroup, ScannerFileEntry};
 
-use crate::{
-    errors::ReplicaError,
-    signature::{content_hash_file, quick_hash_file},
-};
+use crate::signature::{content_hash_file, quick_hash_file};
+
+pub use crate::errors::ReplicaError;
 
 mod errors;
 mod signature;
+
+/// How far [`detect_duplicates`] has gone. Each phase reports its totals as soon as it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparisonProgress {
+    /// Reading the first, middle and last KiB of every file sharing its size with another.
+    Sampling {
+        sampled_files: usize,
+        total_files: usize,
+    },
+    /// Reading the whole content of every file sharing its size and samples with another.
+    Hashing {
+        hashed_files: usize,
+        total_files: usize,
+        hashed_bytes: u64,
+        total_bytes: u64,
+    },
+}
 
 /// Finds every set of files whose whole content is identical. Groups come in no particular order;
 /// the copies inside a group keep the input order.
 ///
 /// Reading every byte of every file is the expensive part, so it only happens for files that
-/// already share a size and a sampled hash with another file.
-pub fn detect_duplicates(files: &[ScannerFileEntry]) -> Result<Vec<DuplicateGroup>, ReplicaError> {
+/// already share a size and a sampled hash with another file. `on_progress` is called once when
+/// each phase starts and once after each file.
+pub fn detect_duplicates(
+    files: &[ScannerFileEntry],
+    mut on_progress: impl FnMut(ComparisonProgress),
+) -> Result<Vec<DuplicateGroup>, ReplicaError> {
     let size_counts: HashMap<u64, usize> = files.iter().map(|it| it.file_size).counts();
+    let size_candidates = files
+        .iter()
+        .filter(|it| size_counts[&it.file_size] > 1)
+        .collect_vec();
 
+    on_progress(ComparisonProgress::Sampling {
+        sampled_files: 0,
+        total_files: size_candidates.len(),
+    });
     let mut candidates_by_sample = HashMap::<(u64, u64), Vec<&ScannerFileEntry>>::new();
-    for file in files.iter().filter(|it| size_counts[&it.file_size] > 1) {
+    for (sampled_files, file) in (1..).zip(&size_candidates) {
         let sampled_hash = quick_hash_file(&file.path, file.file_size)?;
         candidates_by_sample
             .entry((file.file_size, sampled_hash))
             .or_default()
             .push(file);
+        on_progress(ComparisonProgress::Sampling {
+            sampled_files,
+            total_files: size_candidates.len(),
+        });
     }
 
-    let mut duplicate_groups = Vec::new();
-    for candidates in candidates_by_sample
+    let content_candidates = candidates_by_sample
         .into_values()
         .filter(|candidates| candidates.len() > 1)
-    {
+        .collect_vec();
+    let total_files = content_candidates.iter().map(Vec::len).sum();
+    let total_bytes = content_candidates
+        .iter()
+        .flatten()
+        .map(|candidate| candidate.file_size)
+        .sum();
+    let mut hashed_files = 0;
+    let mut hashed_bytes = 0;
+    on_progress(ComparisonProgress::Hashing {
+        hashed_files,
+        total_files,
+        hashed_bytes,
+        total_bytes,
+    });
+
+    let mut duplicate_groups = Vec::new();
+    for candidates in content_candidates {
         let mut copies_by_content = HashMap::<u128, Vec<ScannerFileEntry>>::new();
         for candidate in candidates {
             copies_by_content
                 .entry(content_hash_file(&candidate.path)?)
                 .or_default()
                 .push(candidate.clone());
+            hashed_files += 1;
+            hashed_bytes += candidate.file_size;
+            on_progress(ComparisonProgress::Hashing {
+                hashed_files,
+                total_files,
+                hashed_bytes,
+                total_bytes,
+            });
         }
 
         duplicate_groups.extend(
@@ -53,7 +109,10 @@ pub fn detect_duplicates(files: &[ScannerFileEntry]) -> Result<Vec<DuplicateGrou
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::SystemTime,
+    };
 
     use tempfile::TempDir;
 
@@ -71,6 +130,7 @@ mod tests {
                 let path = directory.join(name);
                 std::fs::write(&path, content)?;
                 Ok(ScannerFileEntry {
+                    modified: std::fs::metadata(&path)?.modified()?,
                     path,
                     file_size: content.len() as u64,
                 })
@@ -115,7 +175,7 @@ mod tests {
 
     #[test]
     fn empty_input_has_no_duplicates() -> Result<(), Box<dyn std::error::Error>> {
-        assert!(detect_duplicates(&[])?.is_empty());
+        assert!(detect_duplicates(&[], |_| {})?.is_empty());
         Ok(())
     }
 
@@ -124,7 +184,7 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let files = write_files(temp_dir.path(), &[("unique", b"unique")])?;
 
-        assert!(detect_duplicates(&files)?.is_empty());
+        assert!(detect_duplicates(&files, |_| {})?.is_empty());
         Ok(())
     }
 
@@ -136,7 +196,7 @@ mod tests {
             &[("small", b"small"), ("large", b"much larger content")],
         )?;
 
-        assert!(detect_duplicates(&files)?.is_empty());
+        assert!(detect_duplicates(&files, |_| {})?.is_empty());
         Ok(())
     }
 
@@ -149,7 +209,7 @@ mod tests {
             &[("first", b"content A"), ("second", b"content B")],
         )?;
 
-        assert!(detect_duplicates(&files)?.is_empty());
+        assert!(detect_duplicates(&files, |_| {})?.is_empty());
         Ok(())
     }
 
@@ -165,7 +225,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["first", "second"])]
         );
         Ok(())
@@ -181,7 +241,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["file1", "file2", "file3"])]
         );
         Ok(())
@@ -203,7 +263,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [
                 paths_under(temp_dir.path(), &["first_a", "first_b"]),
                 paths_under(temp_dir.path(), &["second_a", "second_b"]),
@@ -221,7 +281,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["empty1", "empty2"])]
         );
         Ok(())
@@ -237,7 +297,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["binary1", "binary2"])]
         );
         Ok(())
@@ -253,7 +313,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["large1", "large2"])]
         );
         Ok(())
@@ -267,11 +327,67 @@ mod tests {
             &[("second", b"test content"), ("first", b"test content")],
         )?;
 
-        let duplicates = detect_duplicates(&files)?;
+        let duplicates = detect_duplicates(&files, |_| {})?;
 
         assert_eq!(
             duplicates,
             [DuplicateGroup::new(files).expect("two copies")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reports_sampling_then_hashing_progress_up_to_the_totals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let content: &[u8] = b"identical content";
+        let content_size = content.len() as u64;
+        let files = write_files(
+            temp_dir.path(),
+            &[
+                ("first", content),
+                ("other_size", b"no other file has this size"),
+                ("second", content),
+            ],
+        )?;
+
+        let mut reported_progress = Vec::new();
+        detect_duplicates(&files, |progress| reported_progress.push(progress))?;
+
+        assert_eq!(
+            reported_progress,
+            [
+                ComparisonProgress::Sampling {
+                    sampled_files: 0,
+                    total_files: 2,
+                },
+                ComparisonProgress::Sampling {
+                    sampled_files: 1,
+                    total_files: 2,
+                },
+                ComparisonProgress::Sampling {
+                    sampled_files: 2,
+                    total_files: 2,
+                },
+                ComparisonProgress::Hashing {
+                    hashed_files: 0,
+                    total_files: 2,
+                    hashed_bytes: 0,
+                    total_bytes: 2 * content_size,
+                },
+                ComparisonProgress::Hashing {
+                    hashed_files: 1,
+                    total_files: 2,
+                    hashed_bytes: content_size,
+                    total_bytes: 2 * content_size,
+                },
+                ComparisonProgress::Hashing {
+                    hashed_files: 2,
+                    total_files: 2,
+                    hashed_bytes: 2 * content_size,
+                    total_bytes: 2 * content_size,
+                },
+            ]
         );
         Ok(())
     }
@@ -282,14 +398,16 @@ mod tests {
             ScannerFileEntry {
                 path: PathBuf::from("/tmp/does_not_exist_12345.txt"),
                 file_size: 100,
+                modified: SystemTime::UNIX_EPOCH,
             },
             ScannerFileEntry {
                 path: PathBuf::from("/tmp/does_not_exist_67890.txt"),
                 file_size: 100, // Same size to ensure processing
+                modified: SystemTime::UNIX_EPOCH,
             },
         ];
 
-        let result = detect_duplicates(&files);
+        let result = detect_duplicates(&files, |_| {});
         assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
@@ -305,7 +423,7 @@ mod tests {
             ],
         )?;
 
-        let duplicates = detect_duplicates(&files)?;
+        let duplicates = detect_duplicates(&files, |_| {})?;
 
         assert!(duplicates.is_empty(), "reported {duplicates:?}");
         Ok(())
@@ -325,7 +443,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            grouped_paths(&detect_duplicates(&files)?),
+            grouped_paths(&detect_duplicates(&files, |_| {})?),
             [paths_under(temp_dir.path(), &["copy", "original"])]
         );
         Ok(())
