@@ -9,7 +9,7 @@ use std::{
 };
 
 use model::{DuplicateGroup, SkipReason, SkippedEntry};
-use replica::{ComparisonProgress, ReplicaError};
+use replica::ComparisonProgress;
 use scanner::ScannerError;
 use tracing::{error, info, warn};
 
@@ -42,8 +42,6 @@ pub struct ScanOutcome {
 pub enum PipelineError {
     #[error(transparent)]
     Scan(#[from] ScannerError),
-    #[error(transparent)]
-    Compare(#[from] ReplicaError),
     #[error("the worker stopped without a result")]
     WorkerStopped,
 }
@@ -78,17 +76,18 @@ fn scan_and_compare(
     let outcome = scanner::crawl_and_collect_files(root, |files_found| {
         report(PipelineProgress::Walking { files_found })
     })
-    .map_err(PipelineError::from)
-    .and_then(|scan| {
-        let groups = replica::detect_duplicates(&scan.files, |progress| {
+    .map(|mut scan| {
+        let comparison = replica::detect_duplicates(&scan.files, |progress| {
             report(PipelineProgress::Comparing(progress))
-        })?;
-        Ok(ScanOutcome {
+        });
+        scan.skipped.extend(comparison.skipped);
+        ScanOutcome {
             scanned_files: scan.files.len(),
-            groups,
+            groups: comparison.groups,
             skipped: scan.skipped,
-        })
-    });
+        }
+    })
+    .map_err(PipelineError::from);
 
     match &outcome {
         Ok(outcome) => {
@@ -106,8 +105,9 @@ fn scan_and_compare(
     outcome
 }
 
-/// An unreadable entry is worth a look, so each one gets its own line. Symlinks, special and empty
-/// files are left out by design and can number in the thousands, so they are only counted.
+/// An unreadable entry is worth a look, so each one gets its own line. Symlinks, special files,
+/// empty files and hardlinks are left out by design and can number in the thousands, so they are
+/// only counted.
 fn log_skipped_entries(skipped: &[SkippedEntry]) {
     for entry in skipped {
         if let SkipReason::Unreadable(kind) = entry.reason {
@@ -125,6 +125,7 @@ fn log_skipped_entries(skipped: &[SkippedEntry]) {
         symlinks = count_of(SkipReason::Symlink),
         special_files = count_of(SkipReason::SpecialFile),
         empty_files = count_of(SkipReason::EmptyFile),
+        hardlinks = count_of(SkipReason::Hardlink),
         "entries left out by design"
     );
 }
@@ -143,6 +144,7 @@ mod tests {
         std::fs::write(root.path().join("copy"), "same content")?;
         std::fs::write(root.path().join("unique"), "other content")?;
         std::fs::write(root.path().join("empty"), "")?;
+        std::fs::hard_link(root.path().join("unique"), root.path().join("unique_link"))?;
 
         let last_event = spawn(root.path().to_path_buf())
             .into_iter()
@@ -152,7 +154,8 @@ mod tests {
         let PipelineEvent::Finished(Ok(outcome)) = last_event else {
             panic!("expected a successful outcome, got {last_event:?}");
         };
-        assert_eq!(outcome.scanned_files, 3);
+        // original, copy, unique and its second name; the empty file is skipped by the scan.
+        assert_eq!(outcome.scanned_files, 4);
         let mut grouped_paths: Vec<PathBuf> = outcome
             .groups
             .iter()
@@ -163,12 +166,23 @@ mod tests {
             grouped_paths,
             [root.path().join("copy"), root.path().join("original")]
         );
+        // The scan skips the empty file; the comparison skips whichever name of `unique` the
+        // listing returned second.
+        let mut skipped = outcome.skipped;
+        skipped.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
         assert_eq!(
-            outcome.skipped,
-            [SkippedEntry {
+            skipped[0],
+            SkippedEntry {
                 path: root.path().join("empty"),
                 reason: SkipReason::EmptyFile,
-            }]
+            }
+        );
+        assert_eq!(skipped[1].reason, SkipReason::Hardlink);
+        assert!(
+            [root.path().join("unique"), root.path().join("unique_link")]
+                .contains(&skipped[1].path),
+            "{skipped:?}"
         );
         Ok(())
     }

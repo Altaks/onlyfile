@@ -45,6 +45,9 @@ tempfile = "3.24.0"
 
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
+# Windows file identity (volume serial number and file index), to recognise hardlinks
+winapi-util = "0.1.11"
+
 itertools = { version = "0.14.0" }
 
 [workspace.lints.rust]

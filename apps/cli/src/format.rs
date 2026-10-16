@@ -93,6 +93,7 @@ pub fn format_skip_reason(reason: SkipReason) -> String {
         SkipReason::Symlink => "symlink".to_owned(),
         SkipReason::SpecialFile => "special file".to_owned(),
         SkipReason::EmptyFile => "empty file".to_owned(),
+        SkipReason::Hardlink => "hardlink".to_owned(),
         SkipReason::Unreadable(kind) => format!("unreadable: {kind}"),
     }
 }
@@ -259,6 +260,7 @@ mod tests {
         assert_eq!(format_skip_reason(SkipReason::Symlink), "symlink");
         assert_eq!(format_skip_reason(SkipReason::SpecialFile), "special file");
         assert_eq!(format_skip_reason(SkipReason::EmptyFile), "empty file");
+        assert_eq!(format_skip_reason(SkipReason::Hardlink), "hardlink");
         assert_eq!(
             format_skip_reason(SkipReason::Unreadable(std::io::ErrorKind::PermissionDenied)),
             "unreadable: permission denied"

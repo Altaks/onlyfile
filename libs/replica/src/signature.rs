@@ -1,19 +1,17 @@
 use std::{
     fs::File,
-    io::{ErrorKind, Read, Seek, SeekFrom},
+    io::{self, ErrorKind, Read, Seek, SeekFrom},
     path::Path,
 };
 
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
-
-use crate::errors::ReplicaError;
 
 const FILE_CHUNK_SIZE: usize = 1024;
 
 /// Bytes read per call while streaming a whole file through the hasher.
 const CONTENT_HASH_BUFFER_SIZE: usize = 64 * 1024;
 
-pub(crate) fn quick_hash_file(path: impl AsRef<Path>, file_size: u64) -> Result<u64, ReplicaError> {
+pub(crate) fn quick_hash_file(path: impl AsRef<Path>, file_size: u64) -> io::Result<u64> {
     // If the file is smaller than the size of a scannable chunk, then hash the whole file instead.
     if file_size <= FILE_CHUNK_SIZE as u64 {
         return hash_file(path);
@@ -45,7 +43,7 @@ pub(crate) fn quick_hash_file(path: impl AsRef<Path>, file_size: u64) -> Result<
     Ok(hash.digest())
 }
 
-pub(crate) fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaError> {
+pub(crate) fn content_hash_file(path: impl AsRef<Path>) -> io::Result<u128> {
     let mut file_reader = File::open(path)?;
     let mut hash = Xxh3::new();
     let mut buffer = vec![0u8; CONTENT_HASH_BUFFER_SIZE];
@@ -55,12 +53,12 @@ pub(crate) fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaE
             Ok(0) => return Ok(hash.digest128()),
             Ok(read_bytes_count) => hash.update(&buffer[..read_bytes_count]),
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
     }
 }
 
-pub(crate) fn hash_file(path: impl AsRef<Path>) -> Result<u64, ReplicaError> {
+pub(crate) fn hash_file(path: impl AsRef<Path>) -> io::Result<u64> {
     let file_content = std::fs::read(path)?;
     Ok(xxh3_64(&file_content))
 }
@@ -313,7 +311,10 @@ mod tests {
 
         let result = quick_hash_file(non_existent_path, file_size);
 
-        assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
+        assert!(
+            matches!(&result, Err(error) if error.kind() == ErrorKind::NotFound),
+            "{result:?}"
+        );
     }
 
     /// Test error handling when file size doesn't match actual file size
@@ -327,7 +328,7 @@ mod tests {
 
         // Pass an incorrect file size (larger than actual)
         let incorrect_size = 1000u64;
-        let result: Result<u64, ReplicaError> = quick_hash_file(file_path, incorrect_size);
+        let result = quick_hash_file(file_path, incorrect_size);
 
         // This should still work but may produce unexpected results
         // The function doesn't validate the file_size parameter

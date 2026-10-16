@@ -17,6 +17,8 @@ pub enum SkipReason {
     SpecialFile,
     /// Nothing to reclaim, and often a placeholder that something depends on.
     EmptyFile,
+    /// Another name for a file already counted: removing it would free nothing.
+    Hardlink,
     Unreadable(io::ErrorKind),
 }
 
