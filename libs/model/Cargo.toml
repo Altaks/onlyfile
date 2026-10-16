@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Shared types of onlyfile: scanned files, duplicate groups and skipped entries."
 
 [dependencies]
 

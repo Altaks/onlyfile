@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Walks a folder and lists the regular files worth comparing, with every entry left out and why."
 
 [dependencies]
 model = { workspace = true }

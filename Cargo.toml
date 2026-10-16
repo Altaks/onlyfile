@@ -1,8 +1,11 @@
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# The oldest toolchain the dependencies accept; CI checks the workspace with it.
+rust-version = "1.88"
 authors = ["Altaks"]
 license = "MIT"
+repository = "https://github.com/Altaks/onlyfile"
 
 [workspace]
 resolver = "3"

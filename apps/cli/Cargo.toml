@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Find duplicate files in a folder and move the extra copies to the trash, from a terminal interface."
 
 [dependencies]
 model = { workspace = true }
