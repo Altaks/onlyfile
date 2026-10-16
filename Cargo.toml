@@ -43,9 +43,6 @@ tempfile = "3.24.0"
 
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
-# Fast af sorting algorithm
-glidesort = "0.1.2"
-
 # Bloom filters 
 fastbloom = { version = "0.14.1" }
 

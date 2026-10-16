@@ -15,7 +15,7 @@ pub async fn crawl_and_collect_files(
     while let Some(current_path) = stack.pop() {
         let mut directory_entries = tokio::fs::read_dir(&current_path).await?;
 
-        while let Ok(Some(entry)) = directory_entries.next_entry().await {
+        while let Some(entry) = directory_entries.next_entry().await? {
             let entry_path = entry.path();
             if entry_path.is_dir() {
                 stack.push(entry_path);

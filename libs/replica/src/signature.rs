@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{io::SeekFrom, path::Path};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
@@ -7,29 +7,20 @@ use crate::errors::ReplicaError;
 
 const FILE_CHUNK_SIZE: usize = 1024;
 
+/// Bytes read per call while streaming a whole file through the hasher.
+const CONTENT_HASH_BUFFER_SIZE: usize = 64 * 1024;
+
 pub(crate) async fn quick_hash_file(
     path: impl AsRef<Path>,
     file_size: u64,
 ) -> Result<u64, ReplicaError> {
-    // TODO : Make checks on this, it might make an unexpected behavior since it
-    // TODO : could detect two different files as similar if their sizes differ but not their start/middle/end chunks ? (If that makes any sense)
-
     // If the file is smaller than the size of a scannable chunk, then hash the whole file instead.
     if file_size <= FILE_CHUNK_SIZE as u64 {
         return hash_file(path).await;
     }
 
-    // Create an async file reader
     let mut file_reader = tokio::fs::File::open(&path).await?;
-
-    // Prepare a hasher instance
     let mut hash = Xxh3::new();
-
-    // Read the starting chunk of the file
-    let mut first_chunk = vec![0u8; FILE_CHUNK_SIZE];
-    let first_chunk_read_bytes_count = file_reader.read_buf(&mut first_chunk).await?;
-    debug_assert_eq!(first_chunk_read_bytes_count, FILE_CHUNK_SIZE);
-    hash.update(&first_chunk);
 
     //                                                        WHOLE FILE BYTES
     //                               |--------------------------------------------------------------|
@@ -37,29 +28,35 @@ pub(crate) async fn quick_hash_file(
     //                               |                      ||XXXXXXXXXXXXXXXX|| <- Chunk to hash   |
     //                               |                      ^^                                      |    - (file_chunk_size / 2)
     //                               |             We want to start here                            |    = Seeked byte
+    let sampled_chunk_starts = [
+        SeekFrom::Start(0),
+        SeekFrom::Start(file_size / 2 - FILE_CHUNK_SIZE as u64 / 2),
+        SeekFrom::End(-(FILE_CHUNK_SIZE as i64)),
+    ];
 
-    // Move the `file_reader` to the right position and read the middle chunk
-    let middle_chunk_position =
-        file_size.saturating_div(2) - (FILE_CHUNK_SIZE as u64).saturating_div(2);
-    file_reader
-        .seek(std::io::SeekFrom::Start(middle_chunk_position))
-        .await?; // Seek middle
-    let mut middle_chunk = vec![0u8; FILE_CHUNK_SIZE];
-    let middle_chunk_read_bytes_count = file_reader.read_buf(&mut middle_chunk).await?;
-    debug_assert_eq!(middle_chunk_read_bytes_count, FILE_CHUNK_SIZE);
-    hash.update(&middle_chunk);
-
-    // Move the reader to the end of the file and read the last chunk
-    file_reader
-        .seek(std::io::SeekFrom::End(-(FILE_CHUNK_SIZE as i64)))
-        .await?;
-    let mut end_chunk = vec![0u8; FILE_CHUNK_SIZE];
-    let end_chunk_read_bytes_count = file_reader.read_buf(&mut end_chunk).await?;
-    debug_assert_eq!(end_chunk_read_bytes_count, FILE_CHUNK_SIZE);
-    hash.update(&end_chunk);
+    let mut chunk = [0u8; FILE_CHUNK_SIZE];
+    for chunk_start in sampled_chunk_starts {
+        file_reader.seek(chunk_start).await?;
+        file_reader.read_exact(&mut chunk).await?;
+        hash.update(&chunk);
+    }
 
     // Return the hash result of the three blocks : start, middle and ending bytes chunks
     Ok(hash.digest())
+}
+
+pub(crate) async fn content_hash_file(path: impl AsRef<Path>) -> Result<u128, ReplicaError> {
+    let mut file_reader = tokio::fs::File::open(path).await?;
+    let mut hash = Xxh3::new();
+    let mut buffer = vec![0u8; CONTENT_HASH_BUFFER_SIZE];
+
+    loop {
+        let read_bytes_count = file_reader.read(&mut buffer).await?;
+        if read_bytes_count == 0 {
+            return Ok(hash.digest128());
+        }
+        hash.update(&buffer[..read_bytes_count]);
+    }
 }
 
 pub(crate) async fn hash_file(path: impl AsRef<Path>) -> Result<u64, ReplicaError> {
@@ -72,8 +69,58 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
     use tokio::fs::File;
     use tokio::io::AsyncWriteExt;
+    use xxhash_rust::xxh3::xxh3_128;
 
     use super::*;
+
+    /// A distinct byte at every offset, so a read at the wrong place or of the wrong
+    /// length changes the hash.
+    fn position_dependent_content(length: usize) -> Vec<u8> {
+        (0..length).map(|offset| (offset % 251) as u8).collect()
+    }
+
+    #[tokio::test]
+    async fn quick_hash_covers_exactly_the_first_middle_and_last_chunks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_file = NamedTempFile::new()?;
+        let content = position_dependent_content(5 * FILE_CHUNK_SIZE + 300);
+        tokio::fs::write(temp_file.path(), &content).await?;
+
+        let middle_start = content.len() / 2 - FILE_CHUNK_SIZE / 2;
+        let sampled_bytes = [
+            &content[..FILE_CHUNK_SIZE],
+            &content[middle_start..middle_start + FILE_CHUNK_SIZE],
+            &content[content.len() - FILE_CHUNK_SIZE..],
+        ]
+        .concat();
+
+        let quick_hash = quick_hash_file(temp_file.path(), content.len() as u64).await?;
+        assert_eq!(quick_hash, xxh3_64(&sampled_bytes));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_hash_streams_the_whole_file_across_buffer_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_file = NamedTempFile::new()?;
+        let content = position_dependent_content(2 * CONTENT_HASH_BUFFER_SIZE + 123);
+        tokio::fs::write(temp_file.path(), &content).await?;
+
+        assert_eq!(
+            content_hash_file(temp_file.path()).await?,
+            xxh3_128(&content)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_hash_of_an_empty_file_is_the_hash_of_no_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_file = NamedTempFile::new()?;
+
+        assert_eq!(content_hash_file(temp_file.path()).await?, xxh3_128(&[]));
+        Ok(())
+    }
 
     /// Test hashing a small file (smaller than FILE_CHUNK_SIZE)
     #[tokio::test]
