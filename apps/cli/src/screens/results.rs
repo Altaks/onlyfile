@@ -4,6 +4,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use jiff::tz::TimeZone;
@@ -42,6 +43,9 @@ const GROUPS_PANE_TITLE: &str = " Groups ";
 const MARKED_BOX: &str = "[x] ";
 const UNMARKED_BOX: &str = "[ ] ";
 const SKIPPED_KEY_HINTS: &str = " ↑↓ move  esc back  ? help  q quit ";
+const KEY_HINT_GAP: &str = "  ";
+/// `? help` and `q quit`, which a narrow key bar keeps whatever else it drops.
+const ALWAYS_SHOWN_HINTS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -96,6 +100,7 @@ struct CopyView {
     source: PathBuf,
     /// The path as the screen writes it, home shown as `~`.
     path: String,
+    modified: SystemTime,
     modified_date: String,
     marked: bool,
 }
@@ -115,6 +120,7 @@ impl GroupView {
                 .map(|copy| CopyView {
                     source: copy.path.clone(),
                     path: format_path(&copy.path, home),
+                    modified: copy.modified,
                     modified_date: format_date(copy.modified, time_zone),
                     marked: false,
                 })
@@ -249,6 +255,8 @@ impl ResultsScreen {
             (View::Duplicates, KeyCode::Down) => self.move_selection(Step::Next),
             (View::Duplicates, KeyCode::Char(' ')) => self.toggle_highlighted_copy(),
             (View::Duplicates, KeyCode::Char('k')) => self.keep_only_highlighted_copy(),
+            (View::Duplicates, KeyCode::Char('a')) => self.mark_every_untouched_group(),
+            (View::Duplicates, KeyCode::Char('u')) => self.unmark_every_copy(),
             (View::Duplicates, KeyCode::Char('d')) => self.ask_to_remove_marked_copies(),
             (View::Duplicates, KeyCode::Tab | KeyCode::BackTab) => {
                 self.focus = match self.focus {
@@ -355,7 +363,9 @@ impl ResultsScreen {
                 removal::key_hints(dialog, self.disposal).to_owned()
             }
             (None, View::Skipped) => SKIPPED_KEY_HINTS.to_owned(),
-            (None, View::Duplicates) => self.duplicates_key_hints(),
+            (None, View::Duplicates) => {
+                self.duplicates_key_hints(frame.area().width.saturating_sub(BORDER_CELLS))
+            }
         };
         let outer = Block::bordered()
             .title(screen_title(&self.root_label, &details, frame.area().width))
@@ -375,19 +385,41 @@ impl ResultsScreen {
         }
     }
 
-    fn duplicates_key_hints(&self) -> String {
-        // The arrows go without saying; ? lists every key, so the bar fits 80 columns.
-        let actions = if self.groups.is_empty() {
-            ""
-        } else {
-            "tab pane  space mark  k keep  d remove  "
+    /// The actions available on the duplicates, as wide as `width` allows: on a narrow screen the
+    /// least needed hints go first, and `? help`, which lists every key, always stays.
+    fn duplicates_key_hints(&self, width: u16) -> String {
+        let skipped = format!("s skipped ({})", format_count(self.skipped.len()));
+        // In display order, each with its rank: the higher the rank, the sooner it is dropped.
+        let mut hints: Vec<(&str, u8)> = Vec::new();
+        if !self.groups.is_empty() {
+            hints.extend([
+                ("tab pane", 8),
+                ("a mark all", 3),
+                ("u unmark all", 7),
+                ("space mark", 4),
+                ("k keep", 5),
+                ("d remove", 2),
+            ]);
+        }
+        if !self.skipped.is_empty() {
+            hints.push((&skipped, 6));
+        }
+        hints.extend([("? help", 1), ("q quit", 0)]);
+
+        let render = |hints: &[(&str, u8)]| {
+            let labels: Vec<&str> = hints.iter().map(|(label, _)| *label).collect();
+            format!(" {} ", labels.join(KEY_HINT_GAP))
         };
-        let skipped = if self.skipped.is_empty() {
-            String::new()
-        } else {
-            format!("s skipped ({})  ", format_count(self.skipped.len()))
-        };
-        format!(" {actions}{skipped}? help  q quit ")
+        while render(&hints).width() > usize::from(width) && hints.len() > ALWAYS_SHOWN_HINTS {
+            let least_needed = hints
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, rank))| *rank)
+                .map(|(index, _)| index)
+                .expect("more hints than the ones always shown");
+            hints.remove(least_needed);
+        }
+        render(&hints)
     }
 
     fn render_duplicates(&mut self, frame: &mut Frame, area: Rect) {
@@ -516,6 +548,78 @@ impl ResultsScreen {
                 format_bytes(marked_bytes)
             ),
         }
+    }
+
+    /// In every group where nothing is marked yet, keeps the oldest copy and marks the others. Ties
+    /// go to the shortest path, then to the first path in order, so the result never varies.
+    fn mark_every_untouched_group(&mut self) {
+        let mut marked_groups = 0;
+        let mut marked_copies = 0;
+        let mut marked_bytes = 0;
+        let mut groups_set_by_hand = 0;
+        for group in &mut self.groups {
+            if group.copies.iter().any(|copy| copy.marked) {
+                groups_set_by_hand += 1;
+                continue;
+            }
+            let Some(kept_index) = group
+                .copies
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, copy)| {
+                    (copy.modified, copy.source.as_os_str().len(), &copy.source)
+                })
+                .map(|(index, _)| index)
+            else {
+                continue;
+            };
+            for (index, copy) in group.copies.iter_mut().enumerate() {
+                copy.marked = index != kept_index;
+            }
+            marked_groups += 1;
+            marked_copies += group.copies.len() - 1;
+            marked_bytes += group.reclaimable_bytes();
+        }
+
+        self.notice = Some(match (marked_groups, groups_set_by_hand) {
+            (0, _) => "Every group already has marked copies; u unmarks them all to start over."
+                .to_owned(),
+            (_, 0) => format!(
+                "Marked {} in {} ({}).",
+                format_quantity(marked_copies, "copy", "copies"),
+                format_quantity(marked_groups, "group", "groups"),
+                format_bytes(marked_bytes)
+            ),
+            (_, set_by_hand) => format!(
+                "Marked {} in {} ({}); {} you had set by hand {}.",
+                format_quantity(marked_copies, "copy", "copies"),
+                format_quantity(marked_groups, "group", "groups"),
+                format_bytes(marked_bytes),
+                format_quantity(set_by_hand, "group", "groups"),
+                if set_by_hand == 1 {
+                    "was left as it was"
+                } else {
+                    "were left as they were"
+                }
+            ),
+        });
+    }
+
+    fn unmark_every_copy(&mut self) {
+        let mut unmarked_copies = 0;
+        for copy in self.groups.iter_mut().flat_map(|group| &mut group.copies) {
+            if copy.marked {
+                copy.marked = false;
+                unmarked_copies += 1;
+            }
+        }
+        self.notice = Some(match unmarked_copies {
+            0 => "Nothing is marked.".to_owned(),
+            _ => format!(
+                "Unmarked {}.",
+                format_quantity(unmarked_copies, "copy", "copies")
+            ),
+        });
     }
 
     fn ask_to_remove_marked_copies(&mut self) {

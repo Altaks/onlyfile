@@ -28,7 +28,9 @@ onlyfile --permanent ~/Downloads   # delete instead of moving to the trash
    cancels.
 2. **Browse.** Groups of identical files are listed by the space their removal would free. The right
    pane shows every copy of the selected group with its modified date.
-3. **Mark.** `k` keeps the highlighted copy and marks the others; `space` marks or unmarks one copy.
+3. **Mark.** `a` marks every duplicate at once, keeping the oldest copy of each group (on equal
+   dates, the shortest path); groups you already marked by hand are left as they are. `k` keeps the
+   highlighted copy and marks the others; `space` marks or unmarks one copy; `u` unmarks everything.
    A group always keeps at least one unmarked copy.
 4. **Remove.** `d` asks first, naming how many copies, how much space and where they go. `y` removes
    them; `n` cancels.
@@ -45,6 +47,8 @@ the copies it did not reach stay marked for the next `d`. A second `ctrl-c` quit
 |---|---|
 | `↑` `↓` | Move in the focused list |
 | `tab` | Switch between the groups and the copies |
+| `a` | Mark all but the oldest copy of each group not marked by hand yet |
+| `u` | Unmark every copy |
 | `space` | Mark or unmark the highlighted copy |
 | `k` | Keep the highlighted copy, mark the rest |
 | `d` | Remove the marked copies, after asking |
