@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-xxhash-rust = { workspace = true }
 
 [lints]
 workspace = true

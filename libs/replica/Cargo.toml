@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 model = { workspace = true }
-tokio = { workspace = true }
 xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 itertools = { workspace = true }

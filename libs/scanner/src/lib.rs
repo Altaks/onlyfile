@@ -5,26 +5,22 @@ use model::ScannerFileEntry;
 
 mod errors;
 
-pub async fn crawl_and_collect_files(
+pub fn crawl_and_collect_files(
     path: impl AsRef<Path>,
 ) -> Result<Vec<ScannerFileEntry>, ScannerError> {
     let mut files_collector = Vec::<ScannerFileEntry>::new();
-    let mut stack = Vec::new();
-    stack.push(path.as_ref().to_path_buf());
+    let mut stack = vec![path.as_ref().to_path_buf()];
 
     while let Some(current_path) = stack.pop() {
-        let mut directory_entries = tokio::fs::read_dir(&current_path).await?;
-
-        while let Some(entry) = directory_entries.next_entry().await? {
+        for entry in std::fs::read_dir(&current_path)? {
+            let entry = entry?;
             let entry_path = entry.path();
             if entry_path.is_dir() {
                 stack.push(entry_path);
             } else {
-                let file_size = entry.metadata().await?.len();
-
                 files_collector.push(ScannerFileEntry {
                     path: entry_path,
-                    file_size,
+                    file_size: entry.metadata()?.len(),
                 });
             }
         }
@@ -41,44 +37,44 @@ mod tests {
 
     use crate::crawl_and_collect_files;
 
-    #[tokio::test]
-    async fn test_list_files_in_empty_folder() -> anyhow::Result<()> {
+    #[test]
+    fn test_list_files_in_empty_folder() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
-        let files = crawl_and_collect_files(tempdir.path()).await?;
+        let files = crawl_and_collect_files(tempdir.path())?;
         assert!(files.is_empty());
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_list_files_in_non_empty_folder() -> anyhow::Result<()> {
+    #[test]
+    fn test_list_files_in_non_empty_folder() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
         let file_path = temp_dir.path().join("test.txt");
 
-        tokio::fs::write(&file_path, "contenu").await?;
+        std::fs::write(&file_path, "contenu")?;
 
-        let files = crawl_and_collect_files(temp_dir.path()).await?;
+        let files = crawl_and_collect_files(temp_dir.path())?;
         assert_eq!(files.len(), 1);
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_list_files_in_a_folder_with_multiple_files() -> anyhow::Result<()> {
+    #[test]
+    fn test_list_files_in_a_folder_with_multiple_files() -> anyhow::Result<()> {
         let temp_dir = TempDir::new()?;
 
         const AMOUNT_OF_FILES: usize = 10;
 
         for idx in 0..AMOUNT_OF_FILES {
             let file_path = temp_dir.path().join(format!("content_{}.txt", idx));
-            tokio::fs::write(&file_path, format!("content-{}", idx)).await?;
+            std::fs::write(&file_path, format!("content-{}", idx))?;
         }
 
-        let files = crawl_and_collect_files(temp_dir.path()).await?;
+        let files = crawl_and_collect_files(temp_dir.path())?;
         assert_eq!(files.len(), AMOUNT_OF_FILES);
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_list_files_in_a_folder_with_multiple_nested_files() -> anyhow::Result<()> {
+    #[test]
+    fn test_list_files_in_a_folder_with_multiple_nested_files() -> anyhow::Result<()> {
         let root_dir = TempDir::new()?;
 
         const AMOUNT_OF_BRANCHES: usize = 10;
@@ -86,27 +82,27 @@ mod tests {
 
         for idx in 0..AMOUNT_OF_BRANCHES {
             let current_dir_path = root_dir.path().join(format!("dir_{}", idx));
-            tokio::fs::create_dir(&current_dir_path).await?;
+            std::fs::create_dir(&current_dir_path)?;
 
             for inner_idx in 0..AMOUNT_OF_LEAFS {
                 let file_path = current_dir_path.join(format!("content-{}.tmp", inner_idx));
-                tokio::fs::write(&file_path, format!("content-{}", inner_idx)).await?;
+                std::fs::write(&file_path, format!("content-{}", inner_idx))?;
             }
         }
 
-        let files = crawl_and_collect_files(root_dir.path()).await?;
+        let files = crawl_and_collect_files(root_dir.path())?;
         assert_eq!(files.len(), AMOUNT_OF_BRANCHES * AMOUNT_OF_LEAFS);
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_aggregates_files_sizes_correctly() -> anyhow::Result<()> {
+    #[test]
+    fn test_aggregates_files_sizes_correctly() -> anyhow::Result<()> {
         let root_dir = TempDir::new()?;
 
-        tokio::fs::write(root_dir.path().join("file1.tmp"), "Some content").await?;
-        tokio::fs::write(root_dir.path().join("file2.tmp"), "Some content 2").await?;
+        std::fs::write(root_dir.path().join("file1.tmp"), "Some content")?;
+        std::fs::write(root_dir.path().join("file2.tmp"), "Some content 2")?;
 
-        let mut listed_files = crawl_and_collect_files(root_dir.path()).await?;
+        let mut listed_files = crawl_and_collect_files(root_dir.path())?;
         // read_dir order is filesystem-defined, so compare in path order.
         listed_files.sort_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(
