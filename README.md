@@ -27,7 +27,9 @@ onlyfile --permanent ~/Downloads   # delete instead of moving to the trash
 1. **Scan.** onlyfile walks the folder, then compares candidates, with a live count and a gauge. `q`
    cancels.
 2. **Browse.** Groups of identical files are listed by the space their removal would free. The right
-   pane shows every copy of the selected group with its modified date.
+   pane shows every copy of the selected group with its modified date. A gain bar at the bottom
+   shows what the marked copies would free out of everything the duplicates could:
+   `Gain if removed: 1.2 GiB of 3.1 GiB (39%)`.
 3. **Mark.** `a` marks every duplicate at once, keeping the oldest copy of each group (on equal
    dates, the shortest path); groups you already marked by hand are left as they are. `k` keeps the
    highlighted copy and marks the others; `space` marks or unmarks one copy; `u` unmarks everything.
