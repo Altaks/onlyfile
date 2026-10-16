@@ -9,7 +9,7 @@ mod errors;
 mod signature;
 
 pub async fn detect_duplicates(
-    files: &mut Vec<ScannerFileEntry>,
+    files: &mut [ScannerFileEntry],
 ) -> Result<HashMap<HashedFileEntry, Vec<HashedFileEntry>>, ReplicaError> {
     // Presort files list by their sizes
     glidesort::sort_by_key(files, |it| it.file_size);
@@ -38,7 +38,6 @@ pub async fn detect_duplicates(
     let non_unique_grouped_files_by_size = non_unique_hashed_files
         .iter()
         .filter(|it| hash_counts[&it.hash] > 1) // Only files with duplicate hashes
-        .into_iter()
         .chunk_by(|it| it.file_size);
 
     let non_unique_grouped_files_by_size_and_hashes = non_unique_grouped_files_by_size
@@ -54,11 +53,11 @@ pub async fn detect_duplicates(
 
     non_unique_grouped_files_by_size_and_hashes.for_each(|size_group| {
         size_group.into_iter().for_each(|hash_group| {
-            let mut hash_group_iter = hash_group.1.into_iter();
+            let mut hash_group_iter = hash_group.1;
 
             if let Some(first_file_entry) = hash_group_iter.next() {
                 let mut other_hashed_files = Vec::<HashedFileEntry>::new();
-                while let Some(entry) = hash_group_iter.next() {
+                for entry in hash_group_iter {
                     other_hashed_files.push(entry.clone());
                 }
 
@@ -187,7 +186,10 @@ mod tests {
 
         // With 2 identical files, should have 1 duplicate group
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let (key, dup_files) = duplicates
+            .iter()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1); // One duplicate file
 
         // Verify paths are in the result
@@ -225,7 +227,10 @@ mod tests {
 
         // Should have one duplicate group
         assert_eq!(duplicates.len(), 1);
-        let (_key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 2); // Two duplicate files
 
         Ok(())
@@ -323,7 +328,10 @@ mod tests {
 
         // Should detect empty files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let (key, dup_files) = duplicates
+            .iter()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(key.file_size, 0);
         assert_eq!(dup_files.len(), 1);
 
@@ -357,7 +365,10 @@ mod tests {
 
         // Should detect binary files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())
@@ -391,7 +402,10 @@ mod tests {
 
         // Should detect large files as duplicates
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())
@@ -412,11 +426,7 @@ mod tests {
         ];
 
         let result = detect_duplicates(&mut files).await;
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            ReplicaError::FileSystemError(_) => {} // Expected
-        }
+        assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
     /// Test: Mixed scenario with duplicates and unique files
@@ -492,7 +502,10 @@ mod tests {
 
         // Should still detect duplicates correctly
         assert_eq!(duplicates.len(), 1);
-        let (key, dup_files) = duplicates.iter().next().unwrap();
+        let dup_files = duplicates
+            .values()
+            .next()
+            .expect("exactly one duplicate group");
         assert_eq!(dup_files.len(), 1);
 
         Ok(())

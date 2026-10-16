@@ -1,4 +1,4 @@
-use std::{os::unix::fs::MetadataExt, path::Path};
+use std::path::Path;
 
 use crate::errors::ScannerError;
 use model::ScannerFileEntry;
@@ -20,7 +20,7 @@ pub async fn crawl_and_collect_files(
             if entry_path.is_dir() {
                 stack.push(entry_path);
             } else {
-                let file_size = entry.metadata().await?.size();
+                let file_size = entry.metadata().await?.len();
 
                 files_collector.push(ScannerFileEntry {
                     path: entry_path,
@@ -106,7 +106,9 @@ mod tests {
         tokio::fs::write(root_dir.path().join("file1.tmp"), "Some content").await?;
         tokio::fs::write(root_dir.path().join("file2.tmp"), "Some content 2").await?;
 
-        let listed_files = crawl_and_collect_files(root_dir.path()).await?;
+        let mut listed_files = crawl_and_collect_files(root_dir.path()).await?;
+        // read_dir order is filesystem-defined, so compare in path order.
+        listed_files.sort_by(|left, right| left.path.cmp(&right.path));
         assert_eq!(
             listed_files[0],
             ScannerFileEntry {

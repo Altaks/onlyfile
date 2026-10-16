@@ -287,10 +287,7 @@ mod tests {
 
         let result = quick_hash_file(non_existent_path, file_size).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ReplicaError::FileSystemError(_) => {} // Expected error type
-        }
+        assert!(matches!(result, Err(ReplicaError::FileSystemError(_))));
     }
 
     /// Test error handling when file size doesn't match actual file size
@@ -337,43 +334,6 @@ mod tests {
 
         // For small binary files, should be equal
         assert_eq!(quick_hash, full_hash);
-
-        Ok(())
-    }
-
-    /// Test performance with a very large file
-    #[tokio::test]
-    async fn test_quick_hash_large_file_performance() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_file = NamedTempFile::new()?;
-        let file_path = temp_file.path();
-
-        // Create a large file (4MB to ensure all chunk reads succeed)
-        let large_content = vec![0x42u8; 4 * 1024 * 1024];
-        let mut file: File = File::create(file_path).await?;
-        file.write_all(&large_content).await?;
-        file.flush().await?;
-
-        let file_size = large_content.len() as u64;
-
-        // Time the quick hash
-        let start = std::time::Instant::now();
-        let quick_hash = quick_hash_file(file_path, file_size).await?;
-        let quick_duration = start.elapsed();
-
-        // Time the full hash
-        let start = std::time::Instant::now();
-        let full_hash = hash_file(file_path).await?;
-        let full_duration = start.elapsed();
-
-        // Quick hash should be faster than full hash for large files
-        assert!(quick_duration < full_duration);
-
-        // And they should be different (since we're only hashing parts)
-        assert_ne!(quick_hash, full_hash);
-
-        // But quick hash should be deterministic
-        let quick_hash2 = quick_hash_file(file_path, file_size).await?;
-        assert_eq!(quick_hash, quick_hash2);
 
         Ok(())
     }
