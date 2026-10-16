@@ -15,7 +15,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout, Rect},
     text::Line,
-    widgets::{Block, ListState, Paragraph},
+    widgets::{Block, LineGauge, ListState, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -26,7 +26,7 @@ use crate::{
     },
     pipeline::ScanOutcome,
     screens::{
-        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, help, pane_list,
+        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, done_share, help, pane_list,
         removal::{self, RemovalDialog, RemovalSummary},
         screen_title,
         skipped::SkippedList,
@@ -44,6 +44,10 @@ const MARKED_BOX: &str = "[x] ";
 const UNMARKED_BOX: &str = "[ ] ";
 const SKIPPED_KEY_HINTS: &str = " ↑↓ move  esc back  ? help  q quit ";
 const KEY_HINT_GAP: &str = "  ";
+const PERCENT: f64 = 100.0;
+/// Shapes rather than colours, so the gauge reads without them.
+const GAUGE_FILLED: &str = "█";
+const GAUGE_EMPTY: &str = "░";
 /// `? help` and `q quit`, which a narrow key bar keeps whatever else it drops.
 const ALWAYS_SHOWN_HINTS: usize = 2;
 
@@ -351,10 +355,8 @@ impl ResultsScreen {
             String::new()
         } else {
             format!(
-                " · {} · {} reclaimable{}",
-                format_quantity(self.groups.len(), "group", "groups"),
-                format_bytes(self.groups.iter().map(GroupView::reclaimable_bytes).sum()),
-                self.marked_summary()
+                " · {}",
+                format_quantity(self.groups.len(), "group", "groups")
             )
         };
         let key_hints = match (&self.overlay, self.view) {
@@ -373,10 +375,18 @@ impl ResultsScreen {
         let inner = outer.inner(frame.area());
         frame.render_widget(outer, frame.area());
 
+        let body = if self.groups.is_empty() {
+            inner
+        } else {
+            let [body, gain_row] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+            self.render_gain_bar(frame, gain_row);
+            body
+        };
         match self.view {
-            View::Skipped => self.skipped.render(frame, inner),
-            View::Duplicates if self.groups.is_empty() => self.render_empty(frame, inner),
-            View::Duplicates => self.render_duplicates(frame, inner),
+            View::Skipped => self.skipped.render(frame, body),
+            View::Duplicates if self.groups.is_empty() => self.render_empty(frame, body),
+            View::Duplicates => self.render_duplicates(frame, body),
         }
         match &mut self.overlay {
             Some(Overlay::Help) => help::render(self.disposal, frame, inner),
@@ -538,16 +548,29 @@ impl ResultsScreen {
             })
     }
 
-    /// ` · marked 3 · 1.2 GiB`, or nothing while no copy is marked.
-    fn marked_summary(&self) -> String {
-        match self.marked_totals() {
-            (0, _) => String::new(),
-            (marked_copies, marked_bytes) => format!(
-                " · marked {} · {}",
-                format_count(marked_copies),
-                format_bytes(marked_bytes)
-            ),
-        }
+    /// `Gain if removed: 1.2 GiB of 3.1 GiB (39%)` and a gauge: what the marked copies would free
+    /// of everything the duplicates could.
+    fn render_gain_bar(&self, frame: &mut Frame, area: Rect) {
+        let reclaimable_bytes = self.groups.iter().map(GroupView::reclaimable_bytes).sum();
+        let (_, marked_bytes) = self.marked_totals();
+        let share = done_share(marked_bytes, reclaimable_bytes);
+        // The trash keeps what it receives: the space only comes back once it is emptied.
+        let when_freed = match self.disposal {
+            Disposal::Trash => ", once the trash is emptied",
+            Disposal::Permanent => "",
+        };
+        let label = format!(
+            "Gain if removed: {} of {} ({:.0}%){when_freed}",
+            format_bytes(marked_bytes),
+            format_bytes(reclaimable_bytes),
+            share * PERCENT
+        );
+        let gauge = LineGauge::default()
+            .ratio(share)
+            .label(label)
+            .filled_symbol(GAUGE_FILLED)
+            .unfilled_symbol(GAUGE_EMPTY);
+        frame.render_widget(gauge, area);
     }
 
     /// In every group where nothing is marked yet, keeps the oldest copy and marks the others. Ties

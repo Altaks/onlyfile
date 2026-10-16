@@ -339,6 +339,10 @@ mod tests {
             .collect()
     }
 
+    fn gain_bar(rows: &[String]) -> &str {
+        row_containing(rows, "Gain if removed:")
+    }
+
     fn row_containing<'rows>(rows: &'rows [String], text: &str) -> &'rows str {
         rows.iter()
             .find(|row| row.contains(text))
@@ -400,14 +404,15 @@ mod tests {
 
         let rows = rendered_rows(&mut app, 100, 12);
 
-        row_containing(&rows, "onlyfile ~/Photos · 2 groups · 8.1 KiB reclaimable");
+        row_containing(&rows, " onlyfile ~/Photos · 2 groups ─");
+        row_containing(&rows, "Gain if removed: 0 B of 8.1 KiB (0%)");
         let first_group = row_containing(&rows, "4.0 KiB ×3 big.mov");
         assert!(first_group.contains("> "), "{first_group}");
         row_containing(&rows, "100 B ×2 small.txt");
     }
 
     #[test]
-    fn a_long_root_is_cut_so_the_totals_stay_visible() {
+    fn a_long_root_is_cut_so_the_group_count_stays_visible() {
         let mut app = App::new(RunSettings {
             root_label: "/private/tmp/a/very/long/folder/name/that/does/not/fit/Photos".to_owned(),
             ..settings()
@@ -417,10 +422,7 @@ mod tests {
         let header = rendered_rows(&mut app, 70, 12).remove(0);
 
         assert!(header.contains('…'), "{header}");
-        assert!(
-            header.ends_with("/fit/Photos · 2 groups · 8.1 KiB reclaimable ┐"),
-            "{header}"
-        );
+        assert!(header.ends_with("/fit/Photos · 2 groups ┐"), "{header}");
     }
 
     #[test]
@@ -646,7 +648,7 @@ mod tests {
             &rows,
             " tab pane  a mark all  u unmark all  space mark  k keep  d remove  ? help  q quit ",
         );
-        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 0 B of "));
     }
 
     #[test]
@@ -661,7 +663,7 @@ mod tests {
 
         assert!(copy_row(&rows, "dump/big.mov").contains("[x]"));
         assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
-        assert!(rows[0].contains(" · marked 1 · 4.0 KiB "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 4.0 KiB of "));
     }
 
     #[test]
@@ -674,7 +676,7 @@ mod tests {
         let rows = rendered_rows(&mut app, 110, 12);
 
         assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
-        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 0 B of "));
     }
 
     #[test]
@@ -691,7 +693,7 @@ mod tests {
         let rows = rendered_rows(&mut app, 110, 12);
 
         assert!(copy_row(&rows, "old/big (1).mov").contains("[ ]"));
-        assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 8.0 KiB of "));
         row_containing(
             &rows,
             "Every group keeps one copy: unmark another copy of big.mov first.",
@@ -730,7 +732,7 @@ mod tests {
         assert!(copy_row(&rows, "2023/big.mov").contains("[x]"));
         assert!(copy_row(&rows, "dump/big.mov").contains("[ ]"));
         assert!(copy_row(&rows, "old/big (1).mov").contains("[x]"));
-        assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 8.0 KiB of "));
     }
 
     #[test]
@@ -744,7 +746,7 @@ mod tests {
 
         assert!(copy_row(&rows, "small.txt").contains("[ ]"));
         assert!(copy_row(&rows, "old/small.txt").contains("[x]"));
-        assert!(rows[0].contains(" · marked 1 · 100 B "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 100 B of "));
     }
 
     #[test]
@@ -760,7 +762,7 @@ mod tests {
 
         assert!(copy_row(&rows, "2023/big.mov").contains("[ ]"));
         assert!(copy_row(&rows, "dump/big.mov").contains("[x]"));
-        assert!(rows[0].contains(" · marked 3 · 8.1 KiB "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 8.1 KiB of "));
     }
 
     #[test]
@@ -774,7 +776,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         let rows = rendered_rows(&mut app, 110, 12);
 
-        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 0 B of "));
     }
 
     const PHOTO: &[u8] = b"the same bytes in every copy";
@@ -946,7 +948,7 @@ mod tests {
                 rows.iter().all(|row| !row.contains("Remove marked copies")),
                 "{cancel:?}"
             );
-            assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+            assert!(gain_bar(&rows).contains("Gain if removed: 8.0 KiB of "));
         }
     }
 
@@ -1026,11 +1028,8 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         let rows = rendered_rows(&mut app, 110, 14);
 
-        assert!(
-            rows[0].contains("· 1 group · 5 B reclaimable "),
-            "{}",
-            rows[0]
-        );
+        assert!(rows[0].contains(" · 1 group ─"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains(" of 5 B ("));
         row_containing(&rows, "notes.txt · 5 B · 2 copies");
         assert!(
             rows.iter().all(|row| !row.contains("photo.jpg")),
@@ -1068,11 +1067,8 @@ mod tests {
         // No longer a duplicate of the kept copy, it leaves the group, which is down to one copy.
         press(&mut app, KeyCode::Enter);
         let rows = rendered_rows(&mut app, 110, 14);
-        assert!(
-            rows[0].contains("· 1 group · 5 B reclaimable "),
-            "{}",
-            rows[0]
-        );
+        assert!(rows[0].contains(" · 1 group ─"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains(" of 5 B ("));
         assert!(
             rows.iter().all(|row| !row.contains("photo.jpg")),
             "{}",
@@ -1240,7 +1236,7 @@ mod tests {
         let rows = rendered_rows(&mut app, 110, 14);
         let not_reached = row_containing(&rows, &shown("old/big (1).mov"));
         assert!(not_reached.contains("[x]"), "{not_reached}");
-        assert!(rows[0].contains(" · marked 1 · 4.0 KiB "), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 4.0 KiB of "));
     }
 
     #[test]
@@ -1344,9 +1340,8 @@ mod tests {
             assert!(app.exit.is_none(), "{close:?}");
             assert!(rows.iter().all(|row| !row.contains(" Help ")), "{close:?}");
             assert!(
-                !rows[0].contains("marked"),
-                "k reached the list under the help: {}",
-                rows[0]
+                gain_bar(&rows).contains("Gain if removed: 0 B of "),
+                "k reached the list under the help"
             );
         }
     }
@@ -1486,7 +1481,7 @@ mod tests {
         for path in ["2023/big.mov", "dump/big.mov", "old/big (1).mov"] {
             assert!(!copy_is_marked(&rows, path), "{path}");
         }
-        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+        assert!(gain_bar(&rows).contains("Gain if removed: 0 B of "));
     }
 
     #[test]
@@ -1537,6 +1532,88 @@ mod tests {
                 " a mark all  space mark  k keep  d remove  s skipped (3)  ? help  q quit "
             ),
             "{key_bar}"
+        );
+    }
+
+    #[test]
+    fn the_gain_bar_shows_what_marked_copies_would_free_of_the_total() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        let rows = rendered_rows(&mut app, 110, 14);
+        let nothing_marked = gain_bar(&rows);
+        assert!(
+            nothing_marked
+                .contains("Gain if removed: 0 B of 8.1 KiB (0%), once the trash is emptied"),
+            "{nothing_marked}"
+        );
+        assert!(!nothing_marked.contains('█'), "{nothing_marked}");
+
+        press(&mut app, KeyCode::Char('k'));
+        let rows = rendered_rows(&mut app, 110, 14);
+        let mostly_marked = gain_bar(&rows);
+        assert!(
+            mostly_marked
+                .contains("Gain if removed: 8.0 KiB of 8.1 KiB (99%), once the trash is emptied"),
+            "{mostly_marked}"
+        );
+        assert!(
+            mostly_marked.contains('█') && mostly_marked.contains('░'),
+            "{mostly_marked}"
+        );
+    }
+
+    #[test]
+    fn with_permanent_the_gain_bar_counts_the_space_freed_at_once() {
+        let (_home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('k'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        let bar = gain_bar(&rows);
+        assert!(bar.contains("Gain if removed: 56 B of 61 B (92%)"), "{bar}");
+        assert!(!bar.contains("trash"), "{bar}");
+    }
+
+    #[test]
+    fn the_title_keeps_only_the_folder_and_the_group_count() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Char('k'));
+
+        let title = rendered_rows(&mut app, 110, 14).remove(0);
+
+        assert!(
+            title.starts_with("┌ onlyfile ~/Photos · 2 groups ─"),
+            "{title}"
+        );
+        assert!(
+            !title.contains("marked") && !title.contains("reclaimable"),
+            "{title}"
+        );
+    }
+
+    #[test]
+    fn the_gain_bar_stays_under_the_skipped_list() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        press(&mut app, KeyCode::Char('s'));
+
+        gain_bar(&rendered_rows(&mut app, 110, 14));
+    }
+
+    #[test]
+    fn without_duplicates_there_is_no_gain_bar() {
+        let mut app = app();
+        app.on_pipeline_event(finished(3, Vec::new()));
+
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        assert!(
+            rows.iter().all(|row| !row.contains("Gain if removed")),
+            "{}",
+            rows.join("\n")
         );
     }
 
