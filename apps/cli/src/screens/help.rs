@@ -12,9 +12,11 @@ use crate::screens::text_dialog_area;
 
 pub const KEY_HINTS: &str = " ? or esc close  q quit ";
 const KEY_COLUMN_WIDTH: usize = 9;
-const KEYS: [(&str, &str); 10] = [
+const KEYS: [(&str, &str); 12] = [
     ("↑ ↓", "move in the focused list"),
     ("tab", "switch between the groups and the copies"),
+    ("a", "mark all but the oldest copy of each group"),
+    ("u", "unmark every copy"),
     ("space", "mark or unmark the highlighted copy"),
     ("k", "keep the highlighted copy, mark the rest"),
     ("d", "remove the marked copies, after asking"),
@@ -39,8 +41,10 @@ pub fn render(disposal: Disposal, frame: &mut Frame, area: Rect) {
     lines.extend([
         String::new(),
         "Every group keeps at least one copy.".to_owned(),
-        "During a removal, ctrl-c stops after the current copy; twice, it quits.".to_owned(),
-        "Before a removal, each marked copy is compared byte for byte with the copy its group keeps; one that no longer matches, or that is the kept file under another name, stays where it is.".to_owned(),
+        "a skips the groups you already marked by hand.".to_owned(),
+        // Short enough that the whole help fits an 80 by 24 terminal.
+        "Each marked copy is checked again before removal; one that is no longer a copy stays."
+            .to_owned(),
         disposal_rule.to_owned(),
     ]);
 

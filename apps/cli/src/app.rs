@@ -522,7 +522,7 @@ mod tests {
 
         row_containing(
             &rows,
-            " tab pane  space mark  k keep  d remove  s skipped (3)  ? help  q quit ",
+            " tab pane  a mark all  u unmark all  space mark  k keep  d remove  s skipped (3)  ? help  q quit ",
         );
     }
 
@@ -644,7 +644,7 @@ mod tests {
         }
         row_containing(
             &rows,
-            " tab pane  space mark  k keep  d remove  ? help  q quit ",
+            " tab pane  a mark all  u unmark all  space mark  k keep  d remove  ? help  q quit ",
         );
         assert!(!rows[0].contains("marked"), "{}", rows[0]);
     }
@@ -1271,6 +1271,8 @@ mod tests {
         for line in [
             "↑ ↓      move in the focused list",
             "tab      switch between the groups and the copies",
+            "a        mark all but the oldest copy of each group",
+            "u        unmark every copy",
             "space    mark or unmark the highlighted copy",
             "k        keep the highlighted copy, mark the rest",
             "d        remove the marked copies, after asking",
@@ -1280,7 +1282,7 @@ mod tests {
             "q, esc   quit",
             "ctrl-c   quit, or stop a running removal",
             "Every group keeps at least one copy.",
-            "During a removal, ctrl-c stops after the current copy; twice, it quits.",
+            "a skips the groups you already marked by hand.",
             "Removed copies go to the trash, where they can be restored.",
         ] {
             row_containing(&rows, line);
@@ -1315,6 +1317,17 @@ mod tests {
                 rows.join("\n")
             );
         }
+    }
+
+    #[test]
+    fn the_whole_help_fits_a_standard_80_by_24_terminal() {
+        let (_home, mut app) = real_duplicates();
+        press(&mut app, KeyCode::Char('?'));
+
+        let rows = rendered_rows(&mut app, 80, 24);
+
+        row_containing(&rows, "↑ ↓      move in the focused list");
+        row_containing(&rows, "good.");
     }
 
     #[test]
@@ -1361,6 +1374,170 @@ mod tests {
         empty.on_pipeline_event(finished(3, Vec::new()));
         press(&mut empty, KeyCode::Char('?'));
         row_containing(&rendered_rows(&mut empty, 120, 30), " Help ");
+    }
+
+    fn dated_copy(relative_path: &str, file_size: u64, modified_seconds: u64) -> ScannerFileEntry {
+        ScannerFileEntry {
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_seconds),
+            ..copy(relative_path, file_size)
+        }
+    }
+
+    fn copy_is_marked(rows: &[String], relative_path: &str) -> bool {
+        let row = row_containing(rows, &shown(relative_path));
+        assert!(row.contains("[x]") || row.contains("[ ]"), "{row}");
+        row.contains("[x]")
+    }
+
+    #[test]
+    fn a_keeps_the_oldest_copy_of_every_group_and_marks_the_rest() {
+        let mut app = app();
+        app.on_pipeline_event(finished(
+            5,
+            vec![
+                vec![
+                    dated_copy("new.jpg", 4096, 1_700_000_000),
+                    dated_copy("archive/2019/old.jpg", 4096, 1_500_000_000),
+                    dated_copy("copy.jpg", 4096, 1_600_000_000),
+                ],
+                vec![
+                    dated_copy("b.txt", 100, 1_600_000_000),
+                    dated_copy("a.txt", 100, 1_400_000_000),
+                ],
+            ],
+        ));
+
+        press(&mut app, KeyCode::Char('a'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "Marked 3 copies in 2 groups (8.1 KiB).");
+        assert!(!copy_is_marked(&rows, "archive/2019/old.jpg"));
+        assert!(copy_is_marked(&rows, "new.jpg"));
+        assert!(copy_is_marked(&rows, "copy.jpg"));
+        press(&mut app, KeyCode::Down);
+        let rows = rendered_rows(&mut app, 110, 14);
+        assert!(!copy_is_marked(&rows, "a.txt"));
+        assert!(copy_is_marked(&rows, "b.txt"));
+    }
+
+    #[test]
+    fn on_equal_dates_a_keeps_the_shortest_path_then_the_first_in_order() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('a'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        // 2023/big.mov and dump/big.mov are as long as each other; 2023 comes first.
+        assert!(!copy_is_marked(&rows, "2023/big.mov"));
+        assert!(copy_is_marked(&rows, "dump/big.mov"));
+        assert!(copy_is_marked(&rows, "old/big (1).mov"));
+        press(&mut app, KeyCode::Down);
+        let rows = rendered_rows(&mut app, 110, 14);
+        assert!(!copy_is_marked(&rows, "small.txt"));
+        assert!(copy_is_marked(&rows, "old/small.txt"));
+    }
+
+    #[test]
+    fn a_leaves_the_groups_set_by_hand_as_they_are() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+
+        press(&mut app, KeyCode::Char('a'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(
+            &rows,
+            "Marked 1 copy in 1 group (100 B); 1 group you had set by hand was left as it was.",
+        );
+        assert!(!copy_is_marked(&rows, "old/big (1).mov"));
+        assert!(copy_is_marked(&rows, "2023/big.mov"));
+        assert!(copy_is_marked(&rows, "dump/big.mov"));
+    }
+
+    #[test]
+    fn a_with_every_group_already_marked_says_how_to_start_over() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Char('a'));
+
+        press(&mut app, KeyCode::Char('a'));
+
+        row_containing(
+            &rendered_rows(&mut app, 110, 14),
+            "Every group already has marked copies; u unmarks them all to start over.",
+        );
+    }
+
+    #[test]
+    fn u_unmarks_every_copy_and_says_how_many() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Char('a'));
+
+        press(&mut app, KeyCode::Char('u'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "Unmarked 3 copies.");
+        for path in ["2023/big.mov", "dump/big.mov", "old/big (1).mov"] {
+            assert!(!copy_is_marked(&rows, path), "{path}");
+        }
+        assert!(!rows[0].contains("marked"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn u_with_nothing_marked_says_so() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('u'));
+
+        row_containing(&rendered_rows(&mut app, 110, 14), "Nothing is marked.");
+    }
+
+    #[test]
+    fn a_then_d_asks_to_remove_every_marked_copy() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('d'));
+
+        row_containing(
+            &rendered_rows(&mut app, 110, 14),
+            "Move 3 copies (8.1 KiB) to the trash?",
+        );
+    }
+
+    #[test]
+    fn a_wide_key_bar_lists_every_action() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        row_containing(
+            &rendered_rows(&mut app, 120, 14),
+            " tab pane  a mark all  u unmark all  space mark  k keep  d remove  s skipped (3)  ? help  q quit ",
+        );
+    }
+
+    #[test]
+    fn a_narrow_key_bar_drops_the_least_needed_hints_and_keeps_help_and_quit() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups_and_three_skips());
+
+        let rows = rendered_rows(&mut app, 80, 14);
+
+        let key_bar = rows.last().expect("the screen has rows");
+        assert!(
+            key_bar.contains(
+                " a mark all  space mark  k keep  d remove  s skipped (3)  ? help  q quit "
+            ),
+            "{key_bar}"
+        );
     }
 
     #[test]
