@@ -25,7 +25,7 @@ use crate::{
     },
     pipeline::ScanOutcome,
     screens::{
-        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, pane_list,
+        BORDER_CELLS, HIGHLIGHT_SYMBOL, KeyHandling, Step, help, pane_list,
         removal::{self, RemovalDialog, RemovalSummary},
         screen_title,
         skipped::SkippedList,
@@ -41,12 +41,19 @@ const COLUMN_GAP: &str = "  ";
 const GROUPS_PANE_TITLE: &str = " Groups ";
 const MARKED_BOX: &str = "[x] ";
 const UNMARKED_BOX: &str = "[ ] ";
-const SKIPPED_KEY_HINTS: &str = " ↑↓ move  esc back  q quit ";
+const SKIPPED_KEY_HINTS: &str = " ↑↓ move  esc back  ? help  q quit ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Duplicates,
     Skipped,
+}
+
+/// What can open over the results: one at a time.
+#[derive(Debug)]
+enum Overlay {
+    Help,
+    Removal(RemovalDialog),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +77,7 @@ pub struct ResultsScreen {
     copy_selection: ListState,
     /// Why the last key did nothing, shown until the next key.
     notice: Option<String>,
-    dialog: Option<RemovalDialog>,
+    overlay: Option<Overlay>,
     /// Taken off the scanned folder by every removal since the scan.
     removed_bytes: u64,
 }
@@ -181,27 +188,37 @@ impl ResultsScreen {
             group_selection: ListState::default().with_selected(first_row),
             copy_selection: ListState::default().with_selected(first_row),
             notice: None,
-            dialog: None,
+            overlay: None,
             removed_bytes: 0,
         }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> KeyHandling {
         self.notice = None;
-        if let Some(dialog) = &mut self.dialog {
+        if let Some(Overlay::Help) = self.overlay {
+            return match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.overlay = None;
+                    KeyHandling::Consumed
+                }
+                KeyCode::Char('q') => KeyHandling::Ignored,
+                _ => KeyHandling::Consumed,
+            };
+        }
+        if let Some(Overlay::Removal(dialog)) = &mut self.overlay {
             return match (dialog, key.code) {
                 (RemovalDialog::Confirming { copies, .. }, KeyCode::Char('y')) => {
                     let total_copies = *copies;
-                    self.dialog = Some(RemovalDialog::Removing {
+                    self.overlay = Some(Overlay::Removal(RemovalDialog::Removing {
                         handled_copies: 0,
                         total_copies,
                         stopping: false,
-                    });
+                    }));
                     KeyHandling::Remove(self.groups.iter().filter_map(GroupView::removal).collect())
                 }
                 (RemovalDialog::Confirming { .. }, KeyCode::Char('n') | KeyCode::Esc)
                 | (RemovalDialog::Summary(_), KeyCode::Enter | KeyCode::Esc) => {
-                    self.dialog = None;
+                    self.overlay = None;
                     KeyHandling::Consumed
                 }
                 (RemovalDialog::Summary(summary), KeyCode::Up) => {
@@ -221,6 +238,7 @@ impl ResultsScreen {
         }
 
         match (self.view, key.code) {
+            (_, KeyCode::Char('?')) => self.overlay = Some(Overlay::Help),
             (View::Skipped, KeyCode::Esc | KeyCode::Char('s')) => self.view = View::Duplicates,
             (View::Skipped, KeyCode::Up) => self.skipped.move_selection(Step::Previous),
             (View::Skipped, KeyCode::Down) => self.skipped.move_selection(Step::Next),
@@ -244,7 +262,9 @@ impl ResultsScreen {
     }
 
     pub fn on_removal_progress(&mut self, handled: usize) {
-        if let Some(RemovalDialog::Removing { handled_copies, .. }) = &mut self.dialog {
+        if let Some(Overlay::Removal(RemovalDialog::Removing { handled_copies, .. })) =
+            &mut self.overlay
+        {
             *handled_copies = handled;
         }
     }
@@ -253,14 +273,15 @@ impl ResultsScreen {
     /// with one copy, and unmarks the handled copies that stayed: they were left in place for a
     /// reason the summary gives.
     pub fn on_removal_stopping(&mut self) {
-        if let Some(RemovalDialog::Removing { stopping, .. }) = &mut self.dialog {
+        if let Some(Overlay::Removal(RemovalDialog::Removing { stopping, .. })) = &mut self.overlay
+        {
             *stopping = true;
         }
     }
 
     pub fn on_removal_finished(&mut self, results: &[CopyRemoval]) {
-        let not_reached = match &self.dialog {
-            Some(RemovalDialog::Removing { total_copies, .. }) => {
+        let not_reached = match &self.overlay {
+            Some(Overlay::Removal(RemovalDialog::Removing { total_copies, .. })) => {
                 total_copies.saturating_sub(results.len())
             }
             _ => 0,
@@ -306,12 +327,14 @@ impl ResultsScreen {
         self.group_selection.select(selected_group);
         self.copy_selection.select(selected_group.map(|_| 0));
 
-        self.dialog = Some(RemovalDialog::Summary(RemovalSummary::new(
-            results,
-            not_reached,
-            self.disposal,
-            &self.log_label,
-            &self.home,
+        self.overlay = Some(Overlay::Removal(RemovalDialog::Summary(
+            RemovalSummary::new(
+                results,
+                not_reached,
+                self.disposal,
+                &self.log_label,
+                &self.home,
+            ),
         )));
     }
 
@@ -326,8 +349,11 @@ impl ResultsScreen {
                 self.marked_summary()
             )
         };
-        let key_hints = match (&self.dialog, self.view) {
-            (Some(dialog), _) => removal::key_hints(dialog, self.disposal).to_owned(),
+        let key_hints = match (&self.overlay, self.view) {
+            (Some(Overlay::Help), _) => help::KEY_HINTS.to_owned(),
+            (Some(Overlay::Removal(dialog)), _) => {
+                removal::key_hints(dialog, self.disposal).to_owned()
+            }
             (None, View::Skipped) => SKIPPED_KEY_HINTS.to_owned(),
             (None, View::Duplicates) => self.duplicates_key_hints(),
         };
@@ -342,23 +368,26 @@ impl ResultsScreen {
             View::Duplicates if self.groups.is_empty() => self.render_empty(frame, inner),
             View::Duplicates => self.render_duplicates(frame, inner),
         }
-        if let Some(dialog) = &mut self.dialog {
-            removal::render(dialog, self.disposal, frame, inner);
+        match &mut self.overlay {
+            Some(Overlay::Help) => help::render(self.disposal, frame, inner),
+            Some(Overlay::Removal(dialog)) => removal::render(dialog, self.disposal, frame, inner),
+            None => {}
         }
     }
 
     fn duplicates_key_hints(&self) -> String {
-        let navigation = if self.groups.is_empty() {
+        // The arrows go without saying; ? lists every key, so the bar fits 80 columns.
+        let actions = if self.groups.is_empty() {
             ""
         } else {
-            "↑↓ move  tab switch pane  space mark  k keep this  d remove marked  "
+            "tab pane  space mark  k keep  d remove  "
         };
         let skipped = if self.skipped.is_empty() {
             String::new()
         } else {
             format!("s skipped ({})  ", format_count(self.skipped.len()))
         };
-        format!(" {navigation}{skipped}q quit ")
+        format!(" {actions}{skipped}? help  q quit ")
     }
 
     fn render_duplicates(&mut self, frame: &mut Frame, area: Rect) {
@@ -497,7 +526,12 @@ impl ResultsScreen {
                         .to_owned(),
                 );
             }
-            (copies, bytes) => self.dialog = Some(RemovalDialog::Confirming { copies, bytes }),
+            (copies, bytes) => {
+                self.overlay = Some(Overlay::Removal(RemovalDialog::Confirming {
+                    copies,
+                    bytes,
+                }));
+            }
         }
     }
 
