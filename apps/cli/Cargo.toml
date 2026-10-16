@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 model = { workspace = true }
+purge = { workspace = true }
 scanner = { workspace = true }
 replica = { workspace = true }
 

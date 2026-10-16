@@ -6,12 +6,10 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+identity = { workspace = true }
 model = { workspace = true }
 xxhash-rust = { workspace = true }
 itertools = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-winapi-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

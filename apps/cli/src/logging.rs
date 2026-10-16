@@ -18,18 +18,21 @@ pub struct LogFileError {
 }
 
 /// Appends every log line to `onlyfile/onlyfile.log` under `data_local_dir`, creating both if
-/// needed.
-pub fn init(data_local_dir: &Path) -> Result<(), LogFileError> {
+/// needed, and returns the file's path.
+pub fn init(data_local_dir: &Path) -> Result<PathBuf, LogFileError> {
     let folder = data_local_dir.join(LOG_FOLDER_NAME);
     let path = folder.join(LOG_FILE_NAME);
     let file = std::fs::create_dir_all(&folder)
         .and_then(|()| OpenOptions::new().create(true).append(true).open(&path))
-        .map_err(|source| LogFileError { path, source })?;
+        .map_err(|source| LogFileError {
+            path: path.clone(),
+            source,
+        })?;
 
     tracing_subscriber::fmt()
         .with_writer(Arc::new(file))
         .with_ansi(false)
         .with_target(false)
         .init();
-    Ok(())
+    Ok(path)
 }

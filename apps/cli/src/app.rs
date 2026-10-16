@@ -2,12 +2,13 @@
 
 use std::{
     io,
-    path::PathBuf,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Arc,
+        mpsc::{Receiver, TryRecvError},
+    },
     time::Duration,
 };
 
-use jiff::tz::TimeZone;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -15,41 +16,43 @@ use ratatui::{
 
 use crate::{
     pipeline::{PipelineError, PipelineEvent, PipelineProgress},
+    removal::{self, RemovalEvent, RunningRemoval},
     screens::{KeyHandling, results::ResultsScreen, scanning},
+    settings::RunSettings,
 };
 
-/// While the scan runs, how long the interface waits for a key before redrawing with the worker's
-/// latest progress.
+/// While a worker runs, how long the interface waits for a key before redrawing with its latest
+/// progress.
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub enum AppExit {
     Quit,
     ScanFailed(PipelineError),
+    /// The removal worker went silent before its result; the log lists what it already removed.
+    RemovalInterrupted,
 }
 
 #[derive(Debug)]
 enum Screen {
     Scanning(PipelineProgress),
-    Results(ResultsScreen),
+    Results(Box<ResultsScreen>),
 }
 
 #[derive(Debug)]
 pub struct App {
-    root_label: String,
-    time_zone: TimeZone,
-    home: PathBuf,
+    settings: RunSettings,
     screen: Screen,
+    removal: Option<RunningRemoval>,
     exit: Option<AppExit>,
 }
 
 impl App {
-    pub fn new(root_label: String, time_zone: TimeZone, home: PathBuf) -> Self {
+    pub fn new(settings: RunSettings) -> Self {
         Self {
-            root_label,
-            time_zone,
-            home,
+            settings,
             screen: Screen::Scanning(PipelineProgress::Walking { files_found: 0 }),
+            removal: None,
             exit: None,
         }
     }
@@ -61,14 +64,16 @@ impl App {
     ) -> io::Result<AppExit> {
         loop {
             self.drain_pipeline_events(events);
+            self.drain_removal_events();
             if let Some(exit) = self.exit.take() {
                 return Ok(exit);
             }
             terminal.draw(|frame| self.render(frame))?;
-            // Only the scan changes the screen on its own. Once it is over, nothing changes until a
+            // Only a worker changes the screen on its own. Without one, nothing changes until a
             // key, so waiting for one keeps an idle results screen from redrawing 20 times a second.
-            let scan_in_progress = matches!(self.screen, Screen::Scanning(_));
-            if !scan_in_progress || event::poll(FRAME_INTERVAL)? {
+            let worker_running =
+                matches!(self.screen, Screen::Scanning(_)) || self.removal.is_some();
+            if !worker_running || event::poll(FRAME_INTERVAL)? {
                 self.on_terminal_event(event::read()?);
             }
         }
@@ -76,7 +81,9 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         match &mut self.screen {
-            Screen::Scanning(progress) => scanning::render(progress, &self.root_label, frame),
+            Screen::Scanning(progress) => {
+                scanning::render(progress, &self.settings.root_label, frame);
+            }
             Screen::Results(results) => results.render(frame),
         }
     }
@@ -106,15 +113,38 @@ impl App {
                 }
             }
             PipelineEvent::Finished(Ok(outcome)) => {
-                self.screen = Screen::Results(ResultsScreen::new(
-                    outcome,
-                    self.root_label.clone(),
-                    &self.time_zone,
-                    &self.home,
-                ));
+                self.screen =
+                    Screen::Results(Box::new(ResultsScreen::new(outcome, &self.settings)));
             }
             PipelineEvent::Finished(Err(error)) => self.exit = Some(AppExit::ScanFailed(error)),
         }
+    }
+
+    fn drain_removal_events(&mut self) {
+        let Some(removal) = self.removal.take() else {
+            return;
+        };
+        let Screen::Results(results) = &mut self.screen else {
+            return;
+        };
+        loop {
+            match removal.events.try_recv() {
+                Ok(RemovalEvent::Progress { handled_copies }) => {
+                    results.on_removal_progress(handled_copies);
+                }
+                Ok(RemovalEvent::Finished(outcomes)) => {
+                    results.on_removal_finished(&outcomes);
+                    return;
+                }
+                Err(TryRecvError::Empty) => break,
+                // Like the scan, the removal always says `Finished` before it goes.
+                Err(TryRecvError::Disconnected) => {
+                    self.exit = Some(AppExit::RemovalInterrupted);
+                    return;
+                }
+            }
+        }
+        self.removal = Some(removal);
     }
 
     fn on_terminal_event(&mut self, event: Event) {
@@ -125,20 +155,41 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        // During a removal, a first Ctrl-C lets the worker finish and log the copy it is on, then
+        // shows what was done. Quitting at once could leave a copy removed but not in the log, so
+        // only a second Ctrl-C does that. Anywhere else, Ctrl-C quits.
+        if is_interrupt(key) {
+            match (&self.removal, &mut self.screen) {
+                (Some(removal), Screen::Results(results)) if removal.request_stop() => {
+                    results.on_removal_stopping();
+                }
+                _ => self.exit = Some(AppExit::Quit),
+            }
+            return;
+        }
 
         let handling = match &mut self.screen {
             Screen::Results(results) => results.on_key(key),
             Screen::Scanning(_) => KeyHandling::Ignored,
         };
-        if handling == KeyHandling::Ignored && is_quit_key(key) {
-            self.exit = Some(AppExit::Quit);
+        match handling {
+            KeyHandling::Ignored if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) => {
+                self.exit = Some(AppExit::Quit);
+            }
+            KeyHandling::Remove(removals) => {
+                self.removal = Some(removal::spawn(
+                    removals,
+                    self.settings.disposal,
+                    Arc::default(),
+                ));
+            }
+            KeyHandling::Ignored | KeyHandling::Consumed => {}
         }
     }
 }
 
-fn is_quit_key(key: KeyEvent) -> bool {
-    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-    is_ctrl_c || matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+fn is_interrupt(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 #[cfg(test)]
@@ -153,16 +204,33 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use replica::ComparisonProgress;
 
+    use std::path::PathBuf;
+
+    use jiff::tz::TimeZone;
+    use purge::{CopyRemoval, Disposal, RemovalOutcome};
+    use tempfile::TempDir;
+
     use super::*;
     use crate::pipeline::ScanOutcome;
 
     const HOME: &str = "/home/someone";
     const ROOT_LABEL: &str = "~/Photos";
+    const LOG_LABEL: &str = "~/logs/onlyfile.log";
     /// 2024-01-12T03:00:00Z
     const MODIFIED_SECONDS: u64 = 1_705_028_400;
 
+    fn settings() -> RunSettings {
+        RunSettings {
+            root_label: ROOT_LABEL.to_owned(),
+            time_zone: TimeZone::UTC,
+            home: PathBuf::from(HOME),
+            disposal: Disposal::Trash,
+            log_label: LOG_LABEL.to_owned(),
+        }
+    }
+
     fn app() -> App {
-        App::new(ROOT_LABEL.to_owned(), TimeZone::UTC, PathBuf::from(HOME))
+        App::new(settings())
     }
 
     /// `relative_path` uses `/`; each segment is joined so the path is native on every platform.
@@ -340,11 +408,10 @@ mod tests {
 
     #[test]
     fn a_long_root_is_cut_so_the_totals_stay_visible() {
-        let mut app = App::new(
-            "/private/tmp/a/very/long/folder/name/that/does/not/fit/Photos".to_owned(),
-            TimeZone::UTC,
-            PathBuf::from(HOME),
-        );
+        let mut app = App::new(RunSettings {
+            root_label: "/private/tmp/a/very/long/folder/name/that/does/not/fit/Photos".to_owned(),
+            ..settings()
+        });
         app.on_pipeline_event(two_groups());
 
         let header = rendered_rows(&mut app, 70, 12).remove(0);
@@ -455,7 +522,7 @@ mod tests {
 
         row_containing(
             &rows,
-            " ↑↓ move  tab switch pane  space mark  k keep this  s skipped (3)  q quit ",
+            " ↑↓ move  tab switch pane  space mark  k keep this  d remove marked  s skipped (3)  q quit ",
         );
     }
 
@@ -577,7 +644,7 @@ mod tests {
         }
         row_containing(
             &rows,
-            " ↑↓ move  tab switch pane  space mark  k keep this  q quit ",
+            " ↑↓ move  tab switch pane  space mark  k keep this  d remove marked  q quit ",
         );
         assert!(!rows[0].contains("marked"), "{}", rows[0]);
     }
@@ -708,6 +775,488 @@ mod tests {
         let rows = rendered_rows(&mut app, 110, 12);
 
         assert!(!rows[0].contains("marked"), "{}", rows[0]);
+    }
+
+    const PHOTO: &[u8] = b"the same bytes in every copy";
+    const NOTES: &[u8] = b"notes";
+
+    /// Two groups of real files under a temporary home, so a removal acts on the disk:
+    /// `a/photo.jpg`, `b/photo.jpg`, `c/photo.jpg`, then `x/notes.txt`, `y/notes.txt`.
+    fn real_duplicates() -> (TempDir, App) {
+        let home = TempDir::new().expect("a temporary folder");
+        let mut groups = Vec::new();
+        for (content, paths) in [
+            (
+                PHOTO,
+                ["a/photo.jpg", "b/photo.jpg", "c/photo.jpg"].as_slice(),
+            ),
+            (NOTES, ["x/notes.txt", "y/notes.txt"].as_slice()),
+        ] {
+            let copies = paths
+                .iter()
+                .map(|relative_path| {
+                    let path = home
+                        .path()
+                        .join(relative_path.replace('/', MAIN_SEPARATOR_STR));
+                    std::fs::create_dir_all(path.parent().expect("a parent folder"))
+                        .expect("the temporary folder is writable");
+                    std::fs::write(&path, content).expect("the temporary folder is writable");
+                    ScannerFileEntry {
+                        modified: std::fs::metadata(&path)
+                            .and_then(|metadata| metadata.modified())
+                            .expect("just written"),
+                        path,
+                        file_size: content.len() as u64,
+                    }
+                })
+                .collect();
+            groups.push(copies);
+        }
+
+        let mut app = App::new(RunSettings {
+            home: home.path().to_path_buf(),
+            disposal: Disposal::Permanent,
+            ..settings()
+        });
+        app.on_pipeline_event(finished(5, groups));
+        (home, app)
+    }
+
+    fn real_shown(relative_path: &str) -> String {
+        format!(
+            "~{MAIN_SEPARATOR}{}",
+            relative_path.replace('/', MAIN_SEPARATOR_STR)
+        )
+    }
+
+    fn real_path(home: &TempDir, relative_path: &str) -> PathBuf {
+        home.path()
+            .join(relative_path.replace('/', MAIN_SEPARATOR_STR))
+    }
+
+    /// Polls until the removal worker has delivered its result.
+    fn wait_for_removal(app: &mut App) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while app.removal.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the removal never finished"
+            );
+            app.drain_removal_events();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn d_with_nothing_marked_says_how_to_mark() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('d'));
+
+        row_containing(
+            &rendered_rows(&mut app, 110, 12),
+            "Nothing is marked yet: space marks a copy, k keeps one and marks the rest.",
+        );
+    }
+
+    #[test]
+    fn d_asks_before_moving_marked_copies_to_the_trash() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "Remove marked copies");
+        row_containing(&rows, "Move 2 copies (8.0 KiB) to the trash?");
+        row_containing(
+            &rows,
+            "Each one is first compared byte for byte with the copy its group keeps.",
+        );
+        row_containing(&rows, " y move to the trash  n cancel ");
+    }
+
+    #[test]
+    fn a_narrow_confirmation_wraps_instead_of_cutting_its_text() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        let rows = rendered_rows(&mut app, 60, 16);
+
+        row_containing(&rows, "Move 2 copies (8.0 KiB) to the trash?");
+        row_containing(&rows, "group keeps.");
+    }
+
+    #[test]
+    fn the_confirmation_is_tall_enough_for_its_wrapped_text_at_any_width() {
+        for width in 35..=110 {
+            let (_home, mut app) = real_duplicates();
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char('d'));
+
+            let rows = rendered_rows(&mut app, width, 30);
+
+            let text = rows.join(" ");
+            assert!(
+                text.contains("undone."),
+                "width {width}:\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                text.contains("keeps."),
+                "width {width}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn with_permanent_d_asks_before_deleting_and_says_it_cannot_be_undone() {
+        let (_home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(
+            &rows,
+            "Delete 2 copies (56 B) permanently? This cannot be undone.",
+        );
+        row_containing(&rows, " y delete  n cancel ");
+    }
+
+    #[test]
+    fn n_or_esc_cancel_and_keep_the_marks() {
+        for cancel in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut app = app();
+            app.on_pipeline_event(two_groups());
+
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char('d'));
+            press(&mut app, cancel);
+            let rows = rendered_rows(&mut app, 110, 14);
+
+            assert!(app.exit.is_none(), "{cancel:?}");
+            assert!(app.removal.is_none(), "{cancel:?}");
+            assert!(
+                rows.iter().all(|row| !row.contains("Remove marked copies")),
+                "{cancel:?}"
+            );
+            assert!(rows[0].contains(" · marked 2 · 8.0 KiB "), "{}", rows[0]);
+        }
+    }
+
+    #[test]
+    fn other_keys_do_nothing_while_the_confirmation_is_open() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char(' '));
+
+        assert!(app.exit.is_none());
+        row_containing(
+            &rendered_rows(&mut app, 110, 14),
+            "Move 2 copies (8.0 KiB) to the trash?",
+        );
+    }
+
+    #[test]
+    fn y_removes_the_marked_copies_and_summarises() -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        let rows = rendered_rows(&mut app, 110, 16);
+
+        row_containing(&rows, "Removal summary");
+        row_containing(&rows, "Deleted 2 copies permanently, freeing 56 B.");
+        row_containing(&rows, "Every removal is recorded in:");
+        row_containing(&rows, "  ~/logs/onlyfile.log");
+        row_containing(&rows, " ↑↓ scroll  enter continue  q quit ");
+        assert!(
+            rows.iter().all(|row| !row.contains("Left in place")),
+            "{}",
+            rows.join("\n")
+        );
+        assert_eq!(std::fs::read(real_path(&home, "a/photo.jpg"))?, PHOTO);
+        assert!(!real_path(&home, "b/photo.jpg").exists());
+        assert!(!real_path(&home, "c/photo.jpg").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn keeping_a_later_copy_removes_the_ones_before_and_after_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+
+        row_containing(
+            &rendered_rows(&mut app, 110, 16),
+            "Deleted 2 copies permanently, freeing 56 B.",
+        );
+        assert!(!real_path(&home, "a/photo.jpg").exists());
+        assert_eq!(std::fs::read(real_path(&home, "b/photo.jpg"))?, PHOTO);
+        assert!(!real_path(&home, "c/photo.jpg").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn after_the_summary_the_emptied_group_is_gone() {
+        let (_home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        assert!(
+            rows[0].contains("· 1 group · 5 B reclaimable "),
+            "{}",
+            rows[0]
+        );
+        row_containing(&rows, "notes.txt · 5 B · 2 copies");
+        assert!(
+            rows.iter().all(|row| !row.contains("photo.jpg")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_copy_no_longer_identical_is_left_in_place_and_leaves_its_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+        press(&mut app, KeyCode::Char('k'));
+        std::fs::write(
+            real_path(&home, "b/photo.jpg"),
+            b"the same bytes in every cOpy",
+        )?;
+
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        let rows = rendered_rows(&mut app, 110, 16);
+
+        row_containing(&rows, "Deleted 1 copy permanently, freeing 28 B.");
+        row_containing(&rows, "Left in place (1):");
+        row_containing(
+            &rows,
+            &format!(
+                "  no longer identical to the kept copy  {}",
+                real_shown("b/photo.jpg")
+            ),
+        );
+        assert!(real_path(&home, "b/photo.jpg").exists());
+
+        // No longer a duplicate of the kept copy, it leaves the group, which is down to one copy.
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+        assert!(
+            rows[0].contains("· 1 group · 5 B reclaimable "),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("photo.jpg")),
+            "{}",
+            rows.join("\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn without_a_readable_kept_copy_every_copy_stays_listed_and_unmarked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (home, mut app) = real_duplicates();
+        press(&mut app, KeyCode::Char('k'));
+        std::fs::remove_file(real_path(&home, "a/photo.jpg"))?;
+
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        let rows = rendered_rows(&mut app, 110, 16);
+        row_containing(&rows, "No copy was removed.");
+        row_containing(&rows, "Left in place (2):");
+
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+        row_containing(&rows, "photo.jpg · 28 B · 3 copies");
+        for path in ["b/photo.jpg", "c/photo.jpg"] {
+            let row = row_containing(&rows, &real_shown(path));
+            assert!(row.contains("[ ]"), "{row}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn removing_every_duplicate_says_how_much_was_freed() {
+        let (_home, mut app) = real_duplicates();
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        wait_for_removal(&mut app);
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "No duplicates left in ~/Photos.");
+        row_containing(&rows, "61 B freed.");
+    }
+
+    #[test]
+    fn a_long_root_is_cut_in_the_empty_state_too() {
+        let mut app = App::new(RunSettings {
+            root_label: "/private/tmp/a/very/long/folder/name/that/does/not/fit/Photos".to_owned(),
+            ..settings()
+        });
+        app.on_pipeline_event(finished(3, Vec::new()));
+
+        let rows = rendered_rows(&mut app, 50, 12);
+
+        row_containing(&rows, "No duplicates found in …");
+        row_containing(&rows, "/fit/Photos.");
+    }
+
+    /// Feeds the results of a removal straight to the screen, as the worker would.
+    fn finish_removal(app: &mut App, removed_copies: &[(&str, u64)]) {
+        let Screen::Results(results) = &mut app.screen else {
+            panic!("the results screen is shown");
+        };
+        let removed: Vec<CopyRemoval> = removed_copies
+            .iter()
+            .map(|(relative_path, file_size)| CopyRemoval {
+                path: photo_path(relative_path),
+                file_size: *file_size,
+                outcome: RemovalOutcome::Removed,
+            })
+            .collect();
+        results.on_removal_finished(&removed);
+    }
+
+    #[test]
+    fn a_move_to_the_trash_says_the_space_returns_once_the_trash_is_emptied() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        finish_removal(
+            &mut app,
+            &[("dump/big.mov", 4096), ("old/big (1).mov", 4096)],
+        );
+        let rows = rendered_rows(&mut app, 110, 16);
+
+        row_containing(
+            &rows,
+            "Moved 2 copies (8.0 KiB) to the trash; emptying the trash frees the space.",
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("freeing")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn once_everything_went_to_the_trash_the_empty_state_says_so() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+
+        finish_removal(
+            &mut app,
+            &[
+                ("dump/big.mov", 4096),
+                ("old/big (1).mov", 4096),
+                ("old/small.txt", 100),
+            ],
+        );
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+
+        row_containing(&rows, "No duplicates left in ~/Photos.");
+        row_containing(&rows, "8.1 KiB moved to the trash.");
+    }
+
+    #[test]
+    fn keys_wait_during_a_removal_and_ctrl_c_stops_it_then_quits() {
+        let (_home, mut app) = real_duplicates();
+        let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.exit.is_none());
+        row_containing(
+            &rendered_rows(&mut app, 110, 14),
+            " ctrl-c stop after this copy ",
+        );
+
+        app.on_terminal_event(ctrl_c());
+        assert!(
+            app.exit.is_none(),
+            "the first ctrl-c only asks the worker to stop"
+        );
+        let rows = rendered_rows(&mut app, 110, 14);
+        row_containing(&rows, "Stopping after the current copy");
+        row_containing(&rows, " ctrl-c quit now ");
+
+        app.on_terminal_event(ctrl_c());
+        assert!(matches!(app.exit, Some(AppExit::Quit)));
+    }
+
+    #[test]
+    fn a_stopped_removal_says_what_it_did_not_reach_and_keeps_it_marked() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+
+        // Stopped after the first of the two marked copies.
+        finish_removal(&mut app, &[("dump/big.mov", 4096)]);
+        let rows = rendered_rows(&mut app, 110, 16);
+        row_containing(&rows, "Moved 1 copy (4.0 KiB) to the trash;");
+        row_containing(&rows, "Stopped early: 1 copy not handled, still marked.");
+
+        press(&mut app, KeyCode::Enter);
+        let rows = rendered_rows(&mut app, 110, 14);
+        let not_reached = row_containing(&rows, &shown("old/big (1).mov"));
+        assert!(not_reached.contains("[x]"), "{not_reached}");
+        assert!(rows[0].contains(" · marked 1 · 4.0 KiB "), "{}", rows[0]);
+    }
+
+    #[test]
+    fn a_removal_worker_gone_silent_is_reported() {
+        let mut app = app();
+        app.on_pipeline_event(two_groups());
+        let (sender, receiver) = mpsc::sync_channel::<RemovalEvent>(1);
+        drop(sender);
+        app.removal = Some(RunningRemoval {
+            events: receiver,
+            stop: Default::default(),
+        });
+
+        app.drain_removal_events();
+
+        assert!(matches!(app.exit, Some(AppExit::RemovalInterrupted)));
     }
 
     #[test]

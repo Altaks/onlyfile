@@ -47,12 +47,22 @@ fn an_unknown_flag_is_a_usage_error() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn help_documents_the_path_argument() -> Result<(), Box<dyn std::error::Error>> {
+fn help_documents_the_path_argument_and_the_permanent_flag()
+-> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new(BINARY).arg("--help").output()?;
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
-    assert!(stdout.contains("Usage: onlyfile [PATH]"), "{stdout}");
+    assert!(
+        stdout.contains("Usage: onlyfile [OPTIONS] [PATH]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "      --permanent  Delete marked copies permanently instead of moving them to the trash\n"
+        ),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("[PATH]  Folder to scan. Defaults to the current folder\n"),
         "{stdout}"

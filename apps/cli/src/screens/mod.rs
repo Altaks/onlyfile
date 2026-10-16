@@ -1,3 +1,4 @@
+use purge::GroupRemoval;
 use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, List, ListState},
@@ -6,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::format::truncate_start;
 
+pub mod removal;
 pub mod results;
 pub mod scanning;
 pub mod skipped;
@@ -17,11 +19,13 @@ pub const HIGHLIGHT_SYMBOL: &str = "> ";
 /// One cell for the left border, one for the right.
 pub const BORDER_CELLS: u16 = 2;
 
-/// Whether a screen used a key, or leaves it to the application (to quit, for instance).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a screen used a key, left it to the application (to quit, for instance), or asks the
+/// application to start removing copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyHandling {
     Consumed,
     Ignored,
+    Remove(Vec<GroupRemoval>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +74,15 @@ pub fn screen_title(root_label: &str, details: &str, width: u16) -> String {
     let fixed_width = CORNER_CELLS + format!(" {APP_NAME} {details} ").width();
     let root = truncate_start(root_label, usize::from(width).saturating_sub(fixed_width));
     format!(" {APP_NAME} {root}{details} ")
+}
+
+/// `done / total` for a gauge: nothing to do counts as done, and overshooting stops at full.
+pub fn done_share(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        (done as f64 / total as f64).min(1.0)
+    }
 }
 
 #[cfg(test)]

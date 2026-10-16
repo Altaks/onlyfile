@@ -4,15 +4,12 @@ use std::{
     path::PathBuf,
 };
 
+use identity::FileIdentity;
 use itertools::Itertools;
 use model::{DuplicateGroup, ScannerFileEntry, SkipReason, SkippedEntry};
 
-use crate::{
-    identity::{FileIdentity, file_identity},
-    signature::{content_hash_file, quick_hash_file},
-};
+use crate::signature::{content_hash_file, quick_hash_file};
 
-mod identity;
 mod signature;
 
 /// How far [`detect_duplicates`] has gone. Each phase reports its totals as soon as it starts.
@@ -65,7 +62,7 @@ pub fn detect_duplicates(
     let mut seen_identities = HashSet::<FileIdentity>::new();
     let mut distinct_files = Vec::new();
     for file in with_a_size_twin(files.iter()) {
-        match file_identity(&file.path) {
+        match FileIdentity::of_path(&file.path) {
             Ok(identity) if seen_identities.insert(identity) => distinct_files.push(file),
             Ok(_) => skip(&file.path, SkipReason::Hardlink),
             Err(error) => skip(&file.path, unreadable(error)),

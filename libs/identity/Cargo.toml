@@ -1,0 +1,15 @@
+[package]
+name = "identity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

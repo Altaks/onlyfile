@@ -6,10 +6,19 @@ license = "MIT"
 
 [workspace]
 resolver = "3"
-members = ["apps/cli", "libs/model", "libs/replica", "libs/scanner"]
+members = [
+    "apps/cli",
+    "libs/identity",
+    "libs/model",
+    "libs/purge",
+    "libs/replica",
+    "libs/scanner",
+]
 
 [workspace.dependencies]
+identity = { path = "libs/identity" }
 model = { path = "libs/model" }
+purge = { path = "libs/purge" }
 replica = { path = "libs/replica" }
 scanner = { path = "libs/scanner" }
 
@@ -22,7 +31,8 @@ thiserror = { version = "2.0.17" }
 anyhow = { version = "1.0.100" }
 
 # User interfaces
-ratatui = { version = "0.30.0" }
+# The rendered-line count sizes a dialog with the same word wrapping that draws its text.
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
 unicode-width = "0.2.2"
 
 # Command line arguments
@@ -44,6 +54,9 @@ tempfile = "3.24.0"
 # blake3 = { version = "1.8.3" } 
 
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+# The platform trash: Finder or NSFileManager, freedesktop, the Recycle Bin
+trash = "5.2.9"
 
 # Windows file identity (volume serial number and file index), to recognise hardlinks
 winapi-util = "0.1.11"
